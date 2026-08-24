@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Move completed depth images and metadata into a LeRobot dataset."""
+"""Move completed depth images into a LeRobot dataset."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ class DepthItem:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Move depth images and FoundationStereo metadata into a dataset."
+        description="Move completed depth image directories into a dataset."
     )
     parser.add_argument("source_output", type=Path, help="Depth conversion output directory")
     parser.add_argument("target_dataset", type=Path, help="Target LeRobot dataset root")
@@ -36,45 +36,25 @@ def parse_args() -> argparse.Namespace:
 
 
 def discover_items(source: Path, selected_chunks: set[str]) -> list[DepthItem]:
-    items: set[DepthItem] = set()
-
+    items = []
     image_root = source / "images"
     for path in image_root.glob("chunk-*/observation.images.depth_*/episode_*"):
         if path.is_dir() and (not selected_chunks or path.parents[1].name in selected_chunks):
-            items.add(DepthItem(path.parents[1].name, path.parent.name, path.name))
-
-    metadata_root = source / "annotations/foundation_stereo_depth"
-    for path in metadata_root.glob("chunk-*/observation.images.depth_*/episode_*.json"):
-        if path.is_file() and (not selected_chunks or path.parents[1].name in selected_chunks):
-            items.add(DepthItem(path.parents[1].name, path.parent.name, path.stem))
-
+            items.append(DepthItem(path.parents[1].name, path.parent.name, path.name))
     return sorted(items)
 
 
-def paths_for(item: DepthItem, source: Path, target: Path) -> tuple[tuple[Path, Path], ...]:
+def paths_for(item: DepthItem, source: Path, target: Path) -> tuple[Path, Path]:
     image_relative = Path("images") / item.chunk / item.camera / item.episode
-    metadata_relative = (
-        Path("annotations/foundation_stereo_depth")
-        / item.chunk
-        / item.camera
-        / f"{item.episode}.json"
-    )
-    return (
-        (source / image_relative, target / image_relative),
-        (source / metadata_relative, target / metadata_relative),
-    )
+    return source / image_relative, target / image_relative
 
 
 def validate_plan(items: list[DepthItem], source: Path, target: Path) -> None:
     errors = []
     for item in items:
-        for source_path, target_path in paths_for(item, source, target):
-            source_exists = source_path.exists()
-            target_exists = target_path.exists()
-            if source_exists and target_exists:
-                errors.append(f"Source and target both exist: {source_path} -> {target_path}")
-            elif not source_exists and not target_exists:
-                errors.append(f"Missing from source and target: {source_path}")
+        source_path, target_path = paths_for(item, source, target)
+        if target_path.exists():
+            errors.append(f"Target already exists: {source_path} -> {target_path}")
 
     if errors:
         preview = "\n".join(errors[:20])
@@ -133,8 +113,9 @@ def main() -> None:
     print("Depth output move")
     print(f"  Source:              {source}")
     print(f"  Target:              {target}")
-    print(f"  Depth episode items: {len(items)}")
+    print(f"  Depth image dirs:    {len(items)}")
     print(f"  Chunks:              {', '.join(sorted({item.chunk for item in items}))}")
+    print("  Annotations:         ignored")
     print("  Logs:                ignored")
 
     if args.dry_run:
@@ -143,14 +124,11 @@ def main() -> None:
         return
 
     moved_images = 0
-    moved_metadata = 0
     total = len(items)
     width = len(str(total))
 
     for index, item in enumerate(items, start=1):
-        image_pair, metadata_pair = paths_for(item, source, target)
-        moved_images += move_path(*image_pair)
-        moved_metadata += move_path(*metadata_pair)
+        moved_images += move_path(*paths_for(item, source, target))
 
         if index == 1 or index % 100 == 0 or index == total:
             print(
@@ -159,11 +137,10 @@ def main() -> None:
             )
 
     remove_empty_directories(source / "images")
-    remove_empty_directories(source / "annotations/foundation_stereo_depth")
 
     print("Depth output move complete")
     print(f"  Moved image directories: {moved_images}")
-    print(f"  Moved metadata files:    {moved_metadata}")
+    print(f"  Source annotations kept: {(source / 'annotations').is_dir()}")
     print(f"  Source logs untouched:   {(source / 'logs').is_dir()}")
 
 
