@@ -14,7 +14,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Shard:
-    subset: str
+    dataset_path: Path
     chunk: str
     camera: str
     source_root: Path
@@ -67,10 +67,17 @@ def discover_shards(args: argparse.Namespace) -> list[Shard]:
     if not input_root.is_dir():
         raise FileNotFoundError(f"Input root does not exist: {input_root}")
 
+    subsets = [path for path in input_root.iterdir() if (path / "images").is_dir()]
+    for domain_root in (path for path in input_root.iterdir() if path.is_dir()):
+        subsets.extend(path for path in domain_root.iterdir() if (path / "images").is_dir())
+    subsets = sorted(set(subsets))
+
     if args.subsets:
-        subsets = [input_root / name for name in args.subsets]
-    else:
-        subsets = sorted(path for path in input_root.iterdir() if (path / "images").is_dir())
+        selected_subsets = set(args.subsets)
+        subsets = [path for path in subsets if path.name in selected_subsets]
+        missing = selected_subsets - {path.name for path in subsets}
+        if missing:
+            raise FileNotFoundError(f"Subsets not found: {', '.join(sorted(missing))}")
 
     selected_chunks = set(args.chunks or [])
     shards: list[Shard] = []
@@ -89,7 +96,7 @@ def discover_shards(args: argparse.Namespace) -> list[Shard]:
                 for start in range(0, len(episodes), args.episodes_per_shard):
                     shards.append(
                         Shard(
-                            subset=subset_root.name,
+                            dataset_path=subset_root.relative_to(input_root),
                             chunk=chunk_dir.name,
                             camera=camera_dir.name,
                             source_root=subset_root,
@@ -104,7 +111,7 @@ def output_path(shard: Shard, output_root: Path) -> Path:
     first = shard.episodes[0].name.removeprefix("episode_")
     last = shard.episodes[-1].name.removeprefix("episode_")
     name = f"episodes-{first}-{last}.tar"
-    return output_root / shard.subset / shard.chunk / shard.camera / name
+    return output_root / shard.dataset_path / shard.chunk / shard.camera / name
 
 
 def create_shard(shard: Shard, output_root: Path, overwrite: bool) -> tuple[str, Path]:
