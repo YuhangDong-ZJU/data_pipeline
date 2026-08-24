@@ -15,7 +15,6 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Shard:
-    dataset_path: Path
     chunk: str
     camera: str
     source_root: Path
@@ -26,8 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Pack depth episode directories into uncompressed TAR shards."
     )
-    parser.add_argument("input_root", type=Path, help="Root containing LeRobot subsets")
-    parser.add_argument("output_root", type=Path, help="Directory for TAR shards")
+    parser.add_argument("dataset_root", type=Path, help="Root containing LeRobot subsets")
     parser.add_argument(
         "--subsets",
         nargs="+",
@@ -69,12 +67,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def discover_shards(args: argparse.Namespace) -> list[Shard]:
-    input_root = args.input_root.resolve()
-    if not input_root.is_dir():
-        raise FileNotFoundError(f"Input root does not exist: {input_root}")
+    dataset_root = args.dataset_root.resolve()
+    if not dataset_root.is_dir():
+        raise FileNotFoundError(f"Dataset root does not exist: {dataset_root}")
 
-    subsets = [path for path in input_root.iterdir() if (path / "images").is_dir()]
-    for domain_root in (path for path in input_root.iterdir() if path.is_dir()):
+    subsets = [path for path in dataset_root.iterdir() if (path / "images").is_dir()]
+    for domain_root in (path for path in dataset_root.iterdir() if path.is_dir()):
         subsets.extend(path for path in domain_root.iterdir() if (path / "images").is_dir())
     subsets = sorted(set(subsets))
 
@@ -102,7 +100,6 @@ def discover_shards(args: argparse.Namespace) -> list[Shard]:
                 for start in range(0, len(episodes), args.episodes_per_shard):
                     shards.append(
                         Shard(
-                            dataset_path=subset_root.relative_to(input_root),
                             chunk=chunk_dir.name,
                             camera=camera_dir.name,
                             source_root=subset_root,
@@ -113,11 +110,11 @@ def discover_shards(args: argparse.Namespace) -> list[Shard]:
     return shards
 
 
-def output_path(shard: Shard, output_root: Path) -> Path:
+def output_path(shard: Shard) -> Path:
     first = shard.episodes[0].name.removeprefix("episode_")
     last = shard.episodes[-1].name.removeprefix("episode_")
     name = f"episodes-{first}-{last}.tar"
-    return output_root / shard.dataset_path / shard.chunk / shard.camera / name
+    return shard.source_root / "images" / shard.chunk / shard.camera / name
 
 
 def delete_source_episodes(shard: Shard) -> int:
@@ -145,11 +142,10 @@ def sync_file(path: Path) -> None:
 
 def create_shard(
     shard: Shard,
-    output_root: Path,
     overwrite: bool,
     delete_source: bool,
 ) -> tuple[str, Path, int]:
-    tar_path = output_path(shard, output_root)
+    tar_path = output_path(shard)
     part_path = tar_path.with_suffix(".tar.part")
     tar_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -212,17 +208,15 @@ def main() -> None:
 
     shards = discover_shards(args)
     episode_camera_count = sum(len(shard.episodes) for shard in shards)
-    output_root = args.output_root.resolve()
 
     print(f"Planned TAR files: {len(shards)}")
     print(f"Episode-camera directories: {episode_camera_count}")
 
     if args.dry_run:
         for shard in shards:
-            print(output_path(shard, output_root))
+            print(output_path(shard))
         return
 
-    output_root.mkdir(parents=True, exist_ok=True)
     created = 0
     skipped = 0
 
@@ -231,7 +225,6 @@ def main() -> None:
             executor.submit(
                 create_shard,
                 shard,
-                output_root,
                 args.overwrite,
                 args.delete_source,
             ): shard
