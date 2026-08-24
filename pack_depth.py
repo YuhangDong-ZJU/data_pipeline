@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import tempfile
@@ -53,6 +54,11 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Recreate TAR files that already exist",
+    )
+    parser.add_argument(
+        "--delete-source",
+        action="store_true",
+        help="Delete source episode directories after their TAR is safely written",
     )
     parser.add_argument(
         "--dry-run",
@@ -114,13 +120,42 @@ def output_path(shard: Shard, output_root: Path) -> Path:
     return output_root / shard.dataset_path / shard.chunk / shard.camera / name
 
 
-def create_shard(shard: Shard, output_root: Path, overwrite: bool) -> tuple[str, Path]:
+def delete_source_episodes(shard: Shard) -> int:
+    image_root = (shard.source_root / "images").resolve()
+    deleted = 0
+
+    for episode in shard.episodes:
+        if not episode.exists():
+            continue
+        if episode.is_symlink():
+            raise RuntimeError(f"Refusing to delete symlink: {episode}")
+        target = episode.resolve()
+        if not target.is_relative_to(image_root) or not target.name.startswith("episode_"):
+            raise RuntimeError(f"Refusing to delete unexpected path: {target}")
+        shutil.rmtree(target)
+        deleted += 1
+
+    return deleted
+
+
+def sync_file(path: Path) -> None:
+    with path.open("rb") as file:
+        os.fsync(file.fileno())
+
+
+def create_shard(
+    shard: Shard,
+    output_root: Path,
+    overwrite: bool,
+    delete_source: bool,
+) -> tuple[str, Path, int]:
     tar_path = output_path(shard, output_root)
     part_path = tar_path.with_suffix(".tar.part")
     tar_path.parent.mkdir(parents=True, exist_ok=True)
 
     if tar_path.exists() and not overwrite:
-        return "skipped", tar_path
+        deleted = delete_source_episodes(shard) if delete_source else 0
+        return "skipped", tar_path, deleted
 
     tar_path.unlink(missing_ok=True)
     part_path.unlink(missing_ok=True)
@@ -154,8 +189,10 @@ def create_shard(shard: Shard, output_root: Path, overwrite: bool) -> tuple[str,
             ],
             check=True,
         )
+        sync_file(part_path)
         part_path.replace(tar_path)
-        return "created", tar_path
+        deleted = delete_source_episodes(shard) if delete_source else 0
+        return "created", tar_path, deleted
     except Exception:
         part_path.unlink(missing_ok=True)
         raise
@@ -191,14 +228,21 @@ def main() -> None:
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(create_shard, shard, output_root, args.overwrite): shard
+            executor.submit(
+                create_shard,
+                shard,
+                output_root,
+                args.overwrite,
+                args.delete_source,
+            ): shard
             for shard in shards
         }
         for position, future in enumerate(as_completed(futures), start=1):
-            status, tar_path = future.result()
+            status, tar_path, deleted = future.result()
             created += status == "created"
             skipped += status == "skipped"
-            print(f"[{position}/{len(shards)}] {status}: {tar_path}", flush=True)
+            suffix = f", deleted={deleted}" if args.delete_source else ""
+            print(f"[{position}/{len(shards)}] {status}{suffix}: {tar_path}", flush=True)
 
     print(f"Complete. created={created}, skipped={skipped}")
 
