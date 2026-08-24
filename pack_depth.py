@@ -294,7 +294,7 @@ def main() -> None:
     print(f"  Created TAR files:     {created}", flush=True)
     print(f"  Skipped TAR files:     {skipped}", flush=True)
     if args.delete_source:
-        print(f"  Deleted source dirs:   {deleted_total}", flush=True)
+        print(f"  Deleted episode-camera dirs: {deleted_total}", flush=True)
     print(f"  Total elapsed:         {format_duration(time.monotonic() - total_started)}", flush=True)
 
 
