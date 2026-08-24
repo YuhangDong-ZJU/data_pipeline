@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,6 +118,21 @@ def output_path(shard: Shard) -> Path:
     return shard.source_root / "images" / shard.chunk / shard.camera / name
 
 
+def episode_range(shard: Shard) -> str:
+    first = shard.episodes[0].name.removeprefix("episode_")
+    last = shard.episodes[-1].name.removeprefix("episode_")
+    return f"{first}-{last}"
+
+
+def format_duration(seconds: float) -> str:
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}h{minutes:02d}m{secs:02d}s"
+    return f"{minutes:02d}m{secs:02d}s"
+
+
 def delete_source_episodes(shard: Shard) -> int:
     image_root = (shard.source_root / "images").resolve()
     deleted = 0
@@ -144,14 +160,15 @@ def create_shard(
     shard: Shard,
     overwrite: bool,
     delete_source: bool,
-) -> tuple[str, Path, int]:
+) -> tuple[str, Path, int, float]:
+    started = time.monotonic()
     tar_path = output_path(shard)
     part_path = tar_path.with_suffix(".tar.part")
     tar_path.parent.mkdir(parents=True, exist_ok=True)
 
     if tar_path.exists() and not overwrite:
         deleted = delete_source_episodes(shard) if delete_source else 0
-        return "skipped", tar_path, deleted
+        return "skipped", tar_path, deleted, time.monotonic() - started
 
     tar_path.unlink(missing_ok=True)
     part_path.unlink(missing_ok=True)
@@ -188,7 +205,7 @@ def create_shard(
         sync_file(part_path)
         part_path.replace(tar_path)
         deleted = delete_source_episodes(shard) if delete_source else 0
-        return "created", tar_path, deleted
+        return "created", tar_path, deleted, time.monotonic() - started
     except Exception:
         part_path.unlink(missing_ok=True)
         raise
@@ -198,6 +215,7 @@ def create_shard(
 
 
 def main() -> None:
+    total_started = time.monotonic()
     args = parse_args()
     if args.episodes_per_shard < 1:
         raise ValueError("--episodes-per-shard must be at least 1")
@@ -208,9 +226,17 @@ def main() -> None:
 
     shards = discover_shards(args)
     episode_camera_count = sum(len(shard.episodes) for shard in shards)
+    dataset_root = args.dataset_root.resolve()
 
-    print(f"Planned TAR files: {len(shards)}")
-    print(f"Episode-camera directories: {episode_camera_count}")
+    print("Depth TAR packing", flush=True)
+    print(f"  Dataset root:          {dataset_root}", flush=True)
+    print(f"  TAR location:          in place", flush=True)
+    print(f"  Delete source PNGs:    {'yes' if args.delete_source else 'no'}", flush=True)
+    print(f"  Episodes per TAR:      {args.episodes_per_shard}", flush=True)
+    print(f"  Workers:               {args.workers}", flush=True)
+    print(f"  Planned TAR files:     {len(shards)}", flush=True)
+    print(f"  Episode-camera dirs:   {episode_camera_count}", flush=True)
+    print(flush=True)
 
     if args.dry_run:
         for shard in shards:
@@ -219,6 +245,9 @@ def main() -> None:
 
     created = 0
     skipped = 0
+    deleted_total = 0
+    total = len(shards)
+    progress_width = max(1, len(str(total)))
 
     with ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = {
@@ -231,13 +260,42 @@ def main() -> None:
             for shard in shards
         }
         for position, future in enumerate(as_completed(futures), start=1):
-            status, tar_path, deleted = future.result()
+            shard = futures[future]
+            subset = shard.source_root.relative_to(dataset_root).as_posix()
+            camera = shard.camera.removeprefix("observation.images.")
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                status, tar_path, deleted, elapsed = future.result()
+            except Exception as error:
+                for pending in futures:
+                    pending.cancel()
+                print(
+                    f"[{timestamp}] [{position:0{progress_width}d}/{total}] FAILED  | "
+                    f"{subset} | {shard.chunk} | {camera} | episodes {episode_range(shard)} | "
+                    f"{error}",
+                    flush=True,
+                )
+                raise
+
             created += status == "created"
             skipped += status == "skipped"
-            suffix = f", deleted={deleted}" if args.delete_source else ""
-            print(f"[{position}/{len(shards)}] {status}{suffix}: {tar_path}", flush=True)
+            deleted_total += deleted
+            size_gib = tar_path.stat().st_size / 1024**3
+            deletion = f" | deleted {deleted}" if args.delete_source else ""
+            print(
+                f"[{timestamp}] [{position:0{progress_width}d}/{total}] {status.upper():7} | "
+                f"{subset} | {shard.chunk} | {camera} | episodes {episode_range(shard)} | "
+                f"{size_gib:.2f} GiB{deletion} | {format_duration(elapsed)}",
+                flush=True,
+            )
 
-    print(f"Complete. created={created}, skipped={skipped}")
+    print(flush=True)
+    print("Depth TAR packing complete", flush=True)
+    print(f"  Created TAR files:     {created}", flush=True)
+    print(f"  Skipped TAR files:     {skipped}", flush=True)
+    if args.delete_source:
+        print(f"  Deleted source dirs:   {deleted_total}", flush=True)
+    print(f"  Total elapsed:         {format_duration(time.monotonic() - total_started)}", flush=True)
 
 
 if __name__ == "__main__":
