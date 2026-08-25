@@ -78,5 +78,7 @@ If machines receive disjoint chunks, no global settings are necessary. Useful
 runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
 `DROID_NORMALS_RETRY_DELAY_SECONDS`, `DROID_NORMALS_MAX_RES`,
 `DROID_NORMALS_CRF`, `DROID_NORMALS_CPU_OFFLOAD`, `DROID_NORMALS_SUBSETS`, and
-`DROID_NORMALS_DATASET_PREFIX`. Set the last two to empty strings only when a
+`DROID_NORMALS_DATASET_PREFIX`. `DROID_NORMALS_EPISODES` accepts a comma-separated
+episode list for bounded end-to-end tests. Set the subset and dataset-prefix
+variables to empty strings only when a
 standalone DROID dataset has `videos/` directly at its root.

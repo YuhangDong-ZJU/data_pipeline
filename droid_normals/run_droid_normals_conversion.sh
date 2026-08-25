@@ -14,6 +14,7 @@ GPU_IDS="$3"
 WORK_DIR="$4"
 CAMERAS="${5:-01,02}"
 SUBSETS="${DROID_NORMALS_SUBSETS-real_world/droid}"
+EPISODES="${DROID_NORMALS_EPISODES:-}"
 MAX_ATTEMPTS="${6:-3}"
 CHECK_ONLY="${DROID_NORMALS_CHECK_ONLY:-0}"
 DRY_RUN="${DROID_NORMALS_DRY_RUN:-0}"
@@ -123,6 +124,11 @@ if [[ -n "$SUBSETS" ]]; then
   IFS=',' read -r -a SUBSET_ARRAY <<<"$SUBSETS"
   SUBSET_ARGS+=(--subsets "${SUBSET_ARRAY[@]}")
 fi
+EPISODE_ARGS=()
+if [[ -n "$EPISODES" ]]; then
+  IFS=',' read -r -a EPISODE_ARRAY <<<"$EPISODES"
+  EPISODE_ARGS+=(--episodes "${EPISODE_ARRAY[@]}")
+fi
 LOCAL_WORKERS="${#GPU_ARRAY[@]}"
 GLOBAL_WORKERS="${DROID_NORMALS_GLOBAL_NUM_WORKERS:-$LOCAL_WORKERS}"
 WORKER_OFFSET="${DROID_NORMALS_GLOBAL_WORKER_OFFSET:-0}"
@@ -142,6 +148,7 @@ echo "Dataset:          $DATASET_DIR"
 echo "Chunks:           $CHUNKS"
 echo "Cameras:          ${CAMERA_ARRAY[*]}"
 echo "Subsets:          ${SUBSETS:-<all discovered datasets>}"
+echo "Episodes:         ${EPISODES:-<all episodes in selected chunks>}"
 echo "Physical GPUs:    ${GPU_ARRAY[*]}"
 echo "Global shards:    $GLOBAL_WORKERS (local offset $WORKER_OFFSET)"
 echo "Attempts/video:   $MAX_ATTEMPTS"
@@ -168,6 +175,7 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
         --chunks "$CHUNKS" \
         --cameras "${CAMERA_ARRAY[@]}" \
         "${SUBSET_ARGS[@]}" \
+        "${EPISODE_ARGS[@]}" \
         --num-shards "$GLOBAL_WORKERS" \
         --shard-index "$SHARD_INDEX" \
         --max-attempts "$MAX_ATTEMPTS" \
