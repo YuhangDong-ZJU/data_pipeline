@@ -1,13 +1,15 @@
 # DROID normals — NormalCrafter pipeline
 
-Run all commands after entering the ReCam project root. For example:
+The launcher resolves paths from its own location. The parent directory of
+`droid_normals` is treated as the ReCam project root, so commands work from any
+current directory. Entering the project root first remains the simplest form:
 
 ```bash
 cd /path/to/ReCam
 ```
 
 Commands are launched from `droid_normals/run_droid_normals.sh`. Managed paths
-are relative to that current directory:
+are relative to the resolved ReCam project root:
 
 ```text
 DATA/<dataset_name>

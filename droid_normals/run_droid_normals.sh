@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${RECAM_ROOT:-$PWD}" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
   echo "Usage:"
@@ -11,7 +11,7 @@ usage() {
   echo "  bash $0 [--miniforge-home PATH] check <exp_name> [gpu_id]"
   echo "  bash $0 [--miniforge-home PATH] convert <chunks> <dataset_name> <exp_name> [gpu_ids] [cameras] [max_attempts]"
   echo
-  echo "Paths are relative to the current directory: ./DATA/<dataset_name> and ./Res/<exp_name>."
+  echo "Paths are relative to the ReCam root containing droid_normals: ./DATA/<dataset_name> and ./Res/<exp_name>."
 }
 
 check_name() {
