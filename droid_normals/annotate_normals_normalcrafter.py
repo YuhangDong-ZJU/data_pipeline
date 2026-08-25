@@ -8,6 +8,7 @@ import gc
 import json
 import os
 import queue
+import re
 import socket
 import subprocess
 import sys
@@ -72,7 +73,11 @@ def parse_args() -> argparse.Namespace:
         help="Checkout of Binyr/NormalCrafter with normalcrafter_long_video.patch applied",
     )
     parser.add_argument("--subsets", nargs="+", help="Subset names or paths relative to dataset_root")
-    parser.add_argument("--chunks", nargs="+", help="Chunk names, for example chunk-000 chunk-001")
+    parser.add_argument(
+        "--chunks",
+        nargs="+",
+        help="Chunks such as 0,2,5-7 or chunk-000 chunk-002",
+    )
     parser.add_argument(
         "--cameras",
         nargs="+",
@@ -102,6 +107,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--print-limit", type=int, default=50)
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Maximum attempts for each video, including the first attempt",
+    )
+    parser.add_argument(
+        "--retry-delay-seconds",
+        type=float,
+        default=5.0,
+        help="Delay before retrying a failed video",
+    )
     parser.add_argument(
         "--stale-lock-hours",
         type=float,
@@ -169,6 +186,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--crf must be in [0, 51]")
     if args.stale_lock_hours < 0:
         raise ValueError("--stale-lock-hours cannot be negative")
+    if args.max_attempts < 1:
+        raise ValueError("--max-attempts must be at least 1")
+    if args.retry_delay_seconds < 0:
+        raise ValueError("--retry-delay-seconds cannot be negative")
 
 
 def discover_subset_roots(dataset_root: Path) -> list[Path]:
@@ -196,6 +217,30 @@ def normalized_episode_selectors(values: list[str] | None) -> set[str]:
         else:
             raise ValueError(f"Invalid episode selector: {value}")
     return selected
+
+
+def normalized_chunk_selectors(values: list[str] | None) -> set[str]:
+    selected: set[int] = set()
+    for raw_value in values or []:
+        for value in raw_value.split(","):
+            value = value.strip()
+            if not value:
+                continue
+            if value.startswith("chunk-"):
+                suffix = value.removeprefix("chunk-")
+                if not suffix.isdigit():
+                    raise ValueError(f"Invalid chunk selector: {value}")
+                selected.add(int(suffix))
+                continue
+            match = re.fullmatch(r"(\d+)(?:-(\d+))?", value)
+            if match is None:
+                raise ValueError(f"Invalid chunk selector: {value}")
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            if start > end:
+                raise ValueError(f"Invalid descending chunk range: {value}")
+            selected.update(range(start, end + 1))
+    return {f"chunk-{chunk:03d}" for chunk in selected}
 
 
 def camera_matches(camera: str, selected: set[str]) -> bool:
@@ -231,7 +276,7 @@ def discover_tasks(args: argparse.Namespace) -> list[NormalTask]:
         if missing:
             raise FileNotFoundError(f"Subsets not found: {', '.join(sorted(missing))}")
 
-    selected_chunks = set(args.chunks or [])
+    selected_chunks = normalized_chunk_selectors(args.chunks)
     selected_cameras = set(args.cameras or [])
     selected_episodes = normalized_episode_selectors(args.episodes)
     tasks: list[NormalTask] = []
@@ -288,10 +333,37 @@ def discover_tasks(args: argparse.Namespace) -> list[NormalTask]:
             item.episode,
         )
     )
-    tasks = [task for index, task in enumerate(tasks) if index % args.num_shards == args.shard_index]
-    if args.limit is not None:
-        tasks = tasks[: args.limit]
     return tasks
+
+
+def task_is_complete(task: NormalTask) -> bool:
+    try:
+        if not task.output_path.is_file() or task.output_path.stat().st_size <= 0:
+            return False
+        payload = json.loads(task.metadata_path.read_text(encoding="utf-8"))
+        output = payload["output_video"]
+        return (
+            payload.get("status") == "complete"
+            and int(output["width"]) > 0
+            and int(output["height"]) > 0
+            and int(output["frames"]) > 0
+        )
+    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def select_worker_tasks(
+    discovered: list[NormalTask], args: argparse.Namespace
+) -> tuple[list[NormalTask], int]:
+    pending = [task for task in discovered if args.overwrite or not task_is_complete(task)]
+    worker_tasks = [
+        task
+        for index, task in enumerate(pending)
+        if index % args.num_shards == args.shard_index
+    ]
+    if args.limit is not None:
+        worker_tasks = worker_tasks[: args.limit]
+    return worker_tasks, len(pending)
 
 
 def probe_video(path: Path) -> VideoInfo:
@@ -684,18 +756,19 @@ def process_task(
     frames: list[Any],
     fps: float,
     args: argparse.Namespace,
-) -> None:
+    attempt: int,
+) -> str:
     lock = OutputLock(task.output_path, args.stale_lock_hours)
     if not lock.acquire():
         print(f"LOCKED: {task.output_path}", flush=True)
-        return
+        return "locked"
 
     writer: AsyncMp4Writer | None = None
     started = time.monotonic()
     try:
-        if task.output_path.is_file() and not args.overwrite:
+        if task_is_complete(task) and not args.overwrite:
             print(f"SKIP: {task.output_path}", flush=True)
-            return
+            return "skipped"
         input_info = probe_video(task.input_path)
         writer = AsyncMp4Writer(
             task.output_path,
@@ -731,6 +804,7 @@ def process_task(
                 "pixel_format": "yuv420p",
             },
             "model_load_seconds": runner.load_seconds,
+            "attempt": attempt,
             **inference,
             "wall_seconds": time.monotonic() - started,
             "host": socket.gethostname(),
@@ -742,6 +816,7 @@ def process_task(
             f"{payload['wall_seconds']:.1f}s",
             flush=True,
         )
+        return "complete"
     except BaseException as exc:
         if writer is not None:
             writer.abort()
@@ -754,6 +829,8 @@ def process_task(
             "traceback": traceback.format_exc(),
             "host": socket.gethostname(),
             "wall_seconds": time.monotonic() - started,
+            "attempt": attempt,
+            "max_attempts": args.max_attempts,
         }
         write_json_atomic(task.metadata_path.with_suffix(".failed.json"), failure)
         raise
@@ -761,12 +838,19 @@ def process_task(
         lock.release()
 
 
-def print_plan(tasks: list[NormalTask], args: argparse.Namespace) -> None:
+def print_plan(
+    tasks: list[NormalTask],
+    args: argparse.Namespace,
+    discovered_count: int,
+    pending_count: int,
+) -> None:
     print("NormalCrafter annotation plan")
     print(f"  Dataset root:     {args.dataset_root.resolve()}")
     print(f"  Output root:      {(args.output_root or args.dataset_root).resolve()}")
     print(f"  Shard:            {args.shard_index}/{args.num_shards}")
-    print(f"  Selected videos:  {len(tasks)}")
+    print(f"  Discovered:       {discovered_count}")
+    print(f"  Pending globally: {pending_count}")
+    print(f"  Pending on shard: {len(tasks)}")
     print(f"  Model max side:   {args.max_res}")
     print(f"  Output:           {args.output_width}x{args.output_height} H.264 CRF {args.crf}")
     for task in tasks[: args.print_limit]:
@@ -786,13 +870,12 @@ def main() -> None:
             ):
                 raise RuntimeError(f"{executable} is required but was not found in PATH")
 
-    tasks = discover_tasks(args)
-    print_plan(tasks, args)
-    if args.dry_run or not tasks:
+    discovered = discover_tasks(args)
+    tasks, pending_count = select_worker_tasks(discovered, args)
+    print_plan(tasks, args, len(discovered), pending_count)
+    if args.dry_run:
         return
-
-    pending = [task for task in tasks if args.overwrite or not task.output_path.is_file()]
-    if not pending:
+    if not tasks:
         print("All selected normal videos already exist.", flush=True)
         return
 
@@ -801,38 +884,76 @@ def main() -> None:
     torch.backends.cudnn.benchmark = False
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision("high")
-    print(f"Loading NormalCrafter once for {len(pending)} video(s)...", flush=True)
+    print(f"Loading NormalCrafter once for {len(tasks)} video(s)...", flush=True)
     runner = NormalCrafterRunner(args)
     succeeded = 0
     failed = 0
+    skipped = 0
+    locked = 0
 
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-prefetch") as pool:
-        future: Future[tuple[list[Any], float]] = pool.submit(runner.load_video, pending[0], args)
-        for index, task in enumerate(pending):
-            try:
-                current_future = future
-                if index + 1 < len(pending):
-                    future = pool.submit(runner.load_video, pending[index + 1], args)
-                frames, fps = current_future.result()
+        future: Future[tuple[list[Any], float]] = pool.submit(runner.load_video, tasks[0], args)
+        for index, task in enumerate(tasks):
+            current_future = future
+            if index + 1 < len(tasks):
+                future = pool.submit(runner.load_video, tasks[index + 1], args)
+            print(
+                f"[{index + 1}/{len(tasks)}] {task.chunk} | "
+                f"{task.input_camera} | {task.episode}",
+                flush=True,
+            )
+            final_error: tuple[str, str] | None = None
+            result: str | None = None
+            for attempt in range(1, args.max_attempts + 1):
+                frames: list[Any] | None = None
+                try:
+                    if attempt == 1:
+                        frames, fps = current_future.result()
+                    else:
+                        frames, fps = runner.load_video(task, args)
+                    result = process_task(runner, task, frames, float(fps), args, attempt)
+                    final_error = None
+                    break
+                except Exception as exc:
+                    final_error = (type(exc).__name__, str(exc))
+                    if attempt < args.max_attempts:
+                        print(
+                            f"RETRY {attempt + 1}/{args.max_attempts}: "
+                            f"{task.input_path}: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    if attempt < args.max_attempts and args.retry_delay_seconds:
+                        time.sleep(args.retry_delay_seconds)
+                    if attempt == args.max_attempts and not args.continue_on_error:
+                        raise
+                finally:
+                    if frames is not None:
+                        del frames
+
+            if final_error is not None:
+                failed += 1
+                error_type, error_message = final_error
                 print(
-                    f"[{index + 1}/{len(pending)}] {task.chunk} | "
-                    f"{task.input_camera} | {task.episode}",
+                    f"FAILED after {args.max_attempts} attempt(s): "
+                    f"{task.input_path}: {error_type}: {error_message}",
+                    file=sys.stderr,
                     flush=True,
                 )
-                process_task(runner, task, frames, float(fps), args)
+            elif result == "complete":
                 succeeded += 1
-            except BaseException as exc:
-                failed += 1
-                print(f"FAILED: {task.input_path}: {exc}", file=sys.stderr, flush=True)
-                if not args.continue_on_error:
-                    raise
-                gc.collect()
-                torch.cuda.empty_cache()
-            finally:
-                if "frames" in locals():
-                    del frames
+            elif result == "locked":
+                locked += 1
+            else:
+                skipped += 1
 
-    print(f"NormalCrafter complete: {succeeded} succeeded, {failed} failed", flush=True)
+    print(
+        "NormalCrafter complete: "
+        f"{succeeded} succeeded, {skipped} skipped, {locked} locked, {failed} failed",
+        flush=True,
+    )
     if failed:
         raise SystemExit(1)
 

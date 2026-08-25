@@ -2,23 +2,28 @@
 set -Eeuo pipefail
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-/data2/normalcrafter_test/NormalCrafter}"
-NORMALCRAFTER_PYTHON="${NORMALCRAFTER_PYTHON:-/data2/normalcrafter_test/env/bin/python}"
-DEFAULT_NORMALCRAFTER_HF_HOME="/data2/normalcrafter_test/hf_cache"
+WORK_DIR="${NORMALCRAFTER_WORK_DIR:-$ROOT/Res/${NORMALCRAFTER_EXP_NAME:-default}}"
+NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$WORK_DIR/NormalCrafter}"
+ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 
-if [[ -z "${HF_HOME:-}" && -d "$DEFAULT_NORMALCRAFTER_HF_HOME" ]]; then
-  export HF_HOME="$DEFAULT_NORMALCRAFTER_HF_HOME"
+if [[ -n "${MINIFORGE_HOME:-}" ]]; then
+  export PATH="$MINIFORGE_HOME/bin:$PATH"
 fi
+if [[ -z "${NORMALCRAFTER_PYTHON:-}" ]] && command -v conda >/dev/null 2>&1; then
+  NORMALCRAFTER_PYTHON="$(conda run -n "$ENV_NAME" python -c 'import sys; print(sys.executable)' 2>/dev/null || true)"
+fi
+NORMALCRAFTER_PYTHON="${NORMALCRAFTER_PYTHON:-}"
+export HF_HOME="${HF_HOME:-$WORK_DIR/hf_cache}"
 
 if [[ ! -x "$NORMALCRAFTER_PYTHON" ]]; then
   echo "ERROR: NormalCrafter Python was not found: $NORMALCRAFTER_PYTHON" >&2
-  echo "Set NORMALCRAFTER_PYTHON to the Python executable in its environment." >&2
+  echo "Run run_droid_normals.sh install, or set NORMALCRAFTER_PYTHON." >&2
   exit 1
 fi
 
 if [[ ! -f "$NORMALCRAFTER_ROOT/normalcrafter/normal_crafter_ppl.py" ]]; then
   echo "ERROR: NormalCrafter checkout was not found: $NORMALCRAFTER_ROOT" >&2
-  echo "Set NORMALCRAFTER_ROOT or follow $ROOT/NORMALCRAFTER.md." >&2
+  echo "Run run_droid_normals.sh install, or set NORMALCRAFTER_ROOT." >&2
   exit 1
 fi
 

@@ -1,70 +1,68 @@
-# DROID normals — NormalCrafter annotation worker
+# DROID normals — NormalCrafter pipeline
 
-`annotate_normals_normalcrafter.py` discovers LeRobot videos named
-`videos/chunk-*/observation.images.rgb_*/episode_*.mp4` and writes the matching
-`observation.images.normal_*` MP4. Outputs are atomically published as
-1280x720 H.264, CRF 17, `yuv420p`, at 15 FPS by default.
-
-The worker loads NormalCrafter once, prefetches the next episode, decodes normal
-latents in small chunks, records one JSON status per video, skips completed
-outputs, and uses output locks for safe multi-machine operation. Normal vectors
-remain in NormalCrafter's native view space; rotate them in the dataloader when
-a robot-base convention is required.
-
-## Existing server installation
-
-On the 3539 server the launcher defaults to:
+All commands are launched from `droid_normals/run_droid_normals.sh`. Its managed
+paths are fixed to:
 
 ```text
-NORMALCRAFTER_ROOT=/data2/normalcrafter_test/NormalCrafter
-NORMALCRAFTER_PYTHON=/data2/normalcrafter_test/env/bin/python
-HF_HOME=/data2/normalcrafter_test/hf_cache
+droid_normals/DATA/<dataset_name>
+droid_normals/Res/<exp_name>/NormalCrafter
+droid_normals/Res/<exp_name>/hf_cache
+droid_normals/Res/<exp_name>/logs
 ```
 
-Preview one camera and episode without loading the model:
+Pass the Miniforge root explicitly. It must be the directory containing
+`bin/conda`, for example `/xxxxxx/miniforge/xxxx/`:
 
 ```bash
-bash droid_normals/run_normalcrafter.sh /data2/droid \
-  --chunks chunk-000 \
-  --cameras 01 \
-  --episodes 0 \
-  --dry-run
+MF=/xxxxxx/miniforge/xxxx
+
+bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
+  download 0-3 droid_18k owner/droid_18k 01,02
+
+bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
+  check normalcrafter_v1 0
+
+bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
+  convert 0-3 droid_18k normalcrafter_v1 all 01,02 3
 ```
 
-Run one process per GPU. For four eight-GPU machines, use 32 deterministic
-worker shards and assign each process a unique global shard index from 0 to 31:
+`download` uses Hugging Face's resumable snapshot downloader and materializes
+only `meta/**` and the selected chunk/camera MP4s. The repository ID is explicit
+because the private/filtered 18K RGB dataset cannot be inferred from its local
+directory name.
+
+`check` creates the `droid_normals` conda environment, checks out the pinned
+NormalCrafter revision, applies `normalcrafter_long_video.patch`, installs its
+pinned requirements, downloads both model repositories into the experiment's
+`hf_cache`, and loads the model on one GPU.
+
+`convert` starts one background process per selected physical GPU. Each process
+loads one persistent model and owns a deterministic shard. On the first run, a
+single-GPU preflight populates and validates the shared checkpoint cache before
+the workers start, avoiding concurrent first-download races. A restart first
+filters outputs having both an atomically published MP4 and an atomically
+published `status=complete` JSON, then redistributes only unfinished videos over
+the available workers. Each video is attempted three times by default; if a
+worker process still exits nonzero, the launcher performs a second resumable
+worker pass. Logs are written per pass and GPU below `Res/<exp_name>/logs`.
+
+The output is written beside RGB as
+`videos/chunk-*/observation.images.normal_*/episode_*.mp4`. Defaults are
+1280x720 H.264, CRF 17, `yuv420p`, and 15 FPS. Model inference uses a 1024x576
+working resolution by default because direct 1280x720 inference exceeded 24 GB
+in the tested implementation.
+
+For several machines sharing or synchronizing one output tree, assign disjoint
+global shards. For four machines with eight GPUs each, use the same conversion
+command and set:
 
 ```bash
-# Example: GPU 0 on the first machine uses global shard 0.
-CUDA_VISIBLE_DEVICES=0 bash droid_normals/run_normalcrafter.sh /data2/droid \
-  --cameras 01 02 \
-  --num-shards 32 \
-  --shard-index 0
+# machine 0, then use offsets 8, 16 and 24 on the other machines
+export DROID_NORMALS_GLOBAL_NUM_WORKERS=32
+export DROID_NORMALS_GLOBAL_WORKER_OFFSET=0
 ```
 
-On the first machine, GPU IDs 0–7 use shard indexes 0–7; the second machine uses
-8–15, the third 16–23, and the fourth 24–31. All workers must use identical
-subset/chunk/camera/episode filters and write to the same dataset or synchronized
-output root. A separate destination can be selected with `--output-root`.
-
-## Reproducing the dependency on another machine
-
-NormalCrafter is kept outside this small data-pipeline repository because its
-model source, environment, and Hugging Face checkpoints are independent
-dependencies. Pin the tested upstream revision and apply the repository patch:
-
-```bash
-git clone https://github.com/Binyr/NormalCrafter.git
-cd NormalCrafter
-git checkout 75af9887a2cb14cd1ce3883c5773bc296565777c
-git apply /path/to/data_pipeline/droid_normals/normalcrafter_long_video.patch
-python3.10 -m venv /path/to/normalcrafter-env
-/path/to/normalcrafter-env/bin/pip install -r requirements.txt
-```
-
-Then set `NORMALCRAFTER_ROOT` and `NORMALCRAFTER_PYTHON` before launching.
-
-The default `--max-res 1024` runs a 1280x720 source at 1024x576 internally and
-encodes the result at 1280x720. A direct 1280x720 run (`--max-res 1280`) exceeded
-24 GB GPU memory in the original implementation, so it is not the production
-default.
+If machines receive disjoint chunks, no global settings are necessary. Useful
+runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
+`DROID_NORMALS_RETRY_DELAY_SECONDS`, `DROID_NORMALS_MAX_RES`,
+`DROID_NORMALS_CRF`, and `DROID_NORMALS_CPU_OFFLOAD`.

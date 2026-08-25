@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.tar
 *.tar.part
+droid_normals/DATA/
+droid_normals/Res/
