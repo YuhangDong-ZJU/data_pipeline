@@ -1,4 +1,4 @@
-# NormalCrafter annotation worker
+# DROID normals — NormalCrafter annotation worker
 
 `annotate_normals_normalcrafter.py` discovers LeRobot videos named
 `videos/chunk-*/observation.images.rgb_*/episode_*.mp4` and writes the matching
@@ -24,26 +24,28 @@ HF_HOME=/data2/normalcrafter_test/hf_cache
 Preview one camera and episode without loading the model:
 
 ```bash
-bash run_normalcrafter.sh /data2/droid \
+bash droid_normals/run_normalcrafter.sh /data2/droid \
   --chunks chunk-000 \
   --cameras 01 \
   --episodes 0 \
   --dry-run
 ```
 
-Process external cameras with four deterministic machine shards:
+Run one process per GPU. For four eight-GPU machines, use 32 deterministic
+worker shards and assign each process a unique global shard index from 0 to 31:
 
 ```bash
-# Use shard indexes 0, 1, 2, and 3 on the four machines.
-bash run_normalcrafter.sh /data2/droid \
+# Example: GPU 0 on the first machine uses global shard 0.
+CUDA_VISIBLE_DEVICES=0 bash droid_normals/run_normalcrafter.sh /data2/droid \
   --cameras 01 02 \
-  --num-shards 4 \
+  --num-shards 32 \
   --shard-index 0
 ```
 
-All machines must use identical subset/chunk/camera/episode filters and write to
-the same dataset or synchronized output root. A separate destination can be
-selected with `--output-root`.
+On the first machine, GPU IDs 0–7 use shard indexes 0–7; the second machine uses
+8–15, the third 16–23, and the fourth 24–31. All workers must use identical
+subset/chunk/camera/episode filters and write to the same dataset or synchronized
+output root. A separate destination can be selected with `--output-root`.
 
 ## Reproducing the dependency on another machine
 
@@ -55,7 +57,7 @@ dependencies. Pin the tested upstream revision and apply the repository patch:
 git clone https://github.com/Binyr/NormalCrafter.git
 cd NormalCrafter
 git checkout 75af9887a2cb14cd1ce3883c5773bc296565777c
-git apply /path/to/data_pipeline/normalcrafter_long_video.patch
+git apply /path/to/data_pipeline/droid_normals/normalcrafter_long_video.patch
 python3.10 -m venv /path/to/normalcrafter-env
 /path/to/normalcrafter-env/bin/pip install -r requirements.txt
 ```

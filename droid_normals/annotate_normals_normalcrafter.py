@@ -85,8 +85,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--episode-start", type=int, help="Inclusive numeric episode lower bound")
     parser.add_argument("--episode-end", type=int, help="Inclusive numeric episode upper bound")
-    parser.add_argument("--num-shards", type=int, default=1, help="Number of deterministic machine shards")
-    parser.add_argument("--shard-index", type=int, default=0, help="Zero-based shard assigned to this worker")
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Total deterministic worker shards across all machines and GPUs",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="Zero-based global shard assigned to this GPU worker",
+    )
     parser.add_argument("--limit", type=int, help="Process at most this many selected videos")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -540,7 +550,8 @@ class NormalCrafterRunner:
 
         if "output_type" not in inspect.signature(NormalCrafterPipeline.__call__).parameters:
             raise RuntimeError(
-                "NormalCrafter long-video patch is not applied. See NORMALCRAFTER.md."
+                "NormalCrafter long-video patch is not applied. "
+                "See droid_normals/README.md."
             )
 
         self.torch = torch

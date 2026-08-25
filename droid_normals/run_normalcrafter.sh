@@ -18,7 +18,7 @@ fi
 
 if [[ ! -f "$NORMALCRAFTER_ROOT/normalcrafter/normal_crafter_ppl.py" ]]; then
   echo "ERROR: NormalCrafter checkout was not found: $NORMALCRAFTER_ROOT" >&2
-  echo "Set NORMALCRAFTER_ROOT or follow $ROOT/NORMALCRAFTER.md." >&2
+  echo "Set NORMALCRAFTER_ROOT or follow $ROOT/README.md." >&2
   exit 1
 fi
 
