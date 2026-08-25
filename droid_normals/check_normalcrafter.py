@@ -20,6 +20,7 @@ def main() -> None:
         default="stabilityai/stable-video-diffusion-img2vid-xt",
     )
     parser.add_argument("--cpu-offload", choices=["none", "model", "sequential"], default="none")
+    parser.add_argument("--verbose-inference", action="store_true")
     args = parser.parse_args()
 
     spec = importlib.util.spec_from_file_location("droid_normals_worker", args.worker)
@@ -39,6 +40,7 @@ def main() -> None:
             unet_path=args.unet_path,
             pretrain_path=args.pretrain_path,
             cpu_offload=args.cpu_offload,
+            verbose_inference=args.verbose_inference,
         )
     )
     print(

@@ -16,6 +16,7 @@ import threading
 import time
 import traceback
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--print-limit", type=int, default=50)
     parser.add_argument("--continue-on-error", action="store_true")
+    parser.add_argument(
+        "--verbose-inference",
+        action="store_true",
+        help="Show NormalCrafter internals and progress bars; default: concise worker output",
+    )
     parser.add_argument(
         "--max-attempts",
         type=int,
@@ -612,58 +618,93 @@ class NormalCrafterRunner:
             raise FileNotFoundError(f"NormalCrafter checkout is incomplete: {root}")
         sys.path.insert(0, str(root))
 
-        import inspect
-        import torch
-        from diffusers import AutoencoderKLTemporalDecoder
-        from diffusers.training_utils import set_seed
-        from normalcrafter.normal_crafter_ppl import NormalCrafterPipeline
-        from normalcrafter.unet import DiffusersUNetSpatioTemporalConditionModelNormalCrafter
-        from normalcrafter.utils import read_video_frames
+        self.verbose_inference = bool(getattr(args, "verbose_inference", False))
+        with ExitStack() as stack:
+            if not self.verbose_inference:
+                devnull = stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
+                stack.enter_context(redirect_stdout(devnull))
+                stack.enter_context(redirect_stderr(devnull))
 
-        if "output_type" not in inspect.signature(NormalCrafterPipeline.__call__).parameters:
-            raise RuntimeError(
-                "NormalCrafter long-video patch is not applied. "
-                "See droid_normals/NORMALCRAFTER.md."
+            import inspect
+            import torch
+            from diffusers import AutoencoderKLTemporalDecoder
+            from diffusers.training_utils import set_seed
+            from normalcrafter.normal_crafter_ppl import NormalCrafterPipeline
+            from normalcrafter.unet import DiffusersUNetSpatioTemporalConditionModelNormalCrafter
+            from normalcrafter.utils import read_video_frames
+
+            if "output_type" not in inspect.signature(NormalCrafterPipeline.__call__).parameters:
+                raise RuntimeError(
+                    "NormalCrafter long-video patch is not applied. "
+                    "See droid_normals/NORMALCRAFTER.md."
+                )
+
+            self.torch = torch
+            self.set_seed = set_seed
+            self.read_video_frames = read_video_frames
+            load_started = time.monotonic()
+            unet = DiffusersUNetSpatioTemporalConditionModelNormalCrafter.from_pretrained(
+                args.unet_path,
+                subfolder="unet",
+                low_cpu_mem_usage=True,
             )
-
-        self.torch = torch
-        self.set_seed = set_seed
-        self.read_video_frames = read_video_frames
-        load_started = time.monotonic()
-        unet = DiffusersUNetSpatioTemporalConditionModelNormalCrafter.from_pretrained(
-            args.unet_path,
-            subfolder="unet",
-            low_cpu_mem_usage=True,
-        )
-        vae = AutoencoderKLTemporalDecoder.from_pretrained(args.unet_path, subfolder="vae")
-        vae.to(dtype=torch.float16)
-        unet.to(dtype=torch.float16)
-        self.pipe = NormalCrafterPipeline.from_pretrained(
-            args.pretrain_path,
-            unet=unet,
-            vae=vae,
-            torch_dtype=torch.float16,
-            variant="fp16",
-        )
-        if args.cpu_offload == "none":
-            self.pipe.to("cuda")
-        elif args.cpu_offload == "model":
-            self.pipe.enable_model_cpu_offload()
-        else:
-            self.pipe.enable_sequential_cpu_offload()
+            vae = AutoencoderKLTemporalDecoder.from_pretrained(args.unet_path, subfolder="vae")
+            vae.to(dtype=torch.float16)
+            unet.to(dtype=torch.float16)
+            self.pipe = NormalCrafterPipeline.from_pretrained(
+                args.pretrain_path,
+                unet=unet,
+                vae=vae,
+                torch_dtype=torch.float16,
+                variant="fp16",
+            )
+            self.pipe.set_progress_bar_config(disable=not self.verbose_inference)
+            if args.cpu_offload == "none":
+                self.pipe.to("cuda")
+            elif args.cpu_offload == "model":
+                self.pipe.enable_model_cpu_offload()
+            else:
+                self.pipe.enable_sequential_cpu_offload()
+            self.load_seconds = time.monotonic() - load_started
         try:
             self.pipe.enable_xformers_memory_efficient_attention()
         except Exception as exc:
             print(f"WARNING: xFormers is unavailable: {exc}", flush=True)
-        self.load_seconds = time.monotonic() - load_started
 
     def load_video(self, task: NormalTask, args: argparse.Namespace) -> tuple[list[Any], float]:
-        return self.read_video_frames(
+        if self.verbose_inference:
+            return self.read_video_frames(
+                str(task.input_path),
+                args.process_length,
+                args.target_fps,
+                args.max_res,
+            )
+
+        from decord import VideoReader, cpu
+        from PIL import Image
+
+        probe = VideoReader(str(task.input_path), ctx=cpu(0))
+        original_height, original_width = probe.get_batch([0]).shape[1:3]
+        if max(original_height, original_width) > args.max_res:
+            scale = args.max_res / max(original_height, original_width)
+            height = round(original_height * scale)
+            width = round(original_width * scale)
+        else:
+            height = original_height
+            width = original_width
+        video = VideoReader(
             str(task.input_path),
-            args.process_length,
-            args.target_fps,
-            args.max_res,
+            ctx=cpu(0),
+            width=width,
+            height=height,
         )
+        fps = video.get_avg_fps() if args.target_fps == -1 else args.target_fps
+        stride = max(round(video.get_avg_fps() / fps), 1)
+        frame_indexes = list(range(0, len(video), stride))
+        if args.process_length != -1:
+            frame_indexes = frame_indexes[: args.process_length]
+        frames = video.get_batch(frame_indexes).asnumpy().astype(np.uint8)
+        return [Image.fromarray(frame) for frame in frames], float(fps)
 
     def infer(
         self,
@@ -886,6 +927,7 @@ def main() -> None:
         torch.set_float32_matmul_precision("high")
     print(f"Loading NormalCrafter once for {len(tasks)} video(s)...", flush=True)
     runner = NormalCrafterRunner(args)
+    print(f"NormalCrafter loaded in {runner.load_seconds:.1f}s.", flush=True)
     succeeded = 0
     failed = 0
     skipped = 0

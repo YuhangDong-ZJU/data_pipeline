@@ -18,6 +18,7 @@ EPISODES="${DROID_NORMALS_EPISODES:-}"
 MAX_ATTEMPTS="${6:-3}"
 CHECK_ONLY="${DROID_NORMALS_CHECK_ONLY:-0}"
 DRY_RUN="${DROID_NORMALS_DRY_RUN:-0}"
+VERBOSE_INFERENCE="${DROID_NORMALS_VERBOSE_INFERENCE:-0}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 WORKER="$SCRIPT_DIR/annotate_normals_normalcrafter.py"
@@ -31,8 +32,9 @@ if [[ ! "$MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 if [[ "$CHECK_ONLY" != "0" && "$CHECK_ONLY" != "1" \
-    || "$DRY_RUN" != "0" && "$DRY_RUN" != "1" ]]; then
-  echo "ERROR: DROID_NORMALS_CHECK_ONLY and DROID_NORMALS_DRY_RUN must be 0 or 1." >&2
+    || "$DRY_RUN" != "0" && "$DRY_RUN" != "1" \
+    || "$VERBOSE_INFERENCE" != "0" && "$VERBOSE_INFERENCE" != "1" ]]; then
+  echo "ERROR: check-only, dry-run and verbose-inference settings must be 0 or 1." >&2
   exit 2
 fi
 if [[ -n "${MINIFORGE_HOME:-}" ]]; then
@@ -93,13 +95,19 @@ for GPU_ID in "${GPU_ARRAY[@]}"; do
   fi
 done
 
+VERBOSE_ARGS=()
+if [[ "$VERBOSE_INFERENCE" == "1" ]]; then
+  VERBOSE_ARGS+=(--verbose-inference)
+fi
+
 check_model() {
   CHECK_GPU="${GPU_ARRAY[0]}"
   echo "Loading NormalCrafter on physical GPU $CHECK_GPU."
   CUDA_VISIBLE_DEVICES="$CHECK_GPU" "$PYTHON" "$SCRIPT_DIR/check_normalcrafter.py" \
     --worker "$WORKER" \
     --normalcrafter-root "$NORMALCRAFTER_ROOT" \
-    --cpu-offload "${DROID_NORMALS_CPU_OFFLOAD:-none}"
+    --cpu-offload "${DROID_NORMALS_CPU_OFFLOAD:-none}" \
+    "${VERBOSE_ARGS[@]}"
   printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MODEL_READY_MARKER"
 }
 
@@ -160,6 +168,7 @@ WORKER_MODE_ARGS=()
 if [[ "$DRY_RUN" == "1" ]]; then
   WORKER_MODE_ARGS+=(--dry-run)
 fi
+WORKER_MODE_ARGS+=("${VERBOSE_ARGS[@]}")
 FINAL_FAILED=0
 for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
   echo "Starting asynchronous GPU worker pass $PASS/$WORKER_PASSES."

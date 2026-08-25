@@ -93,3 +93,8 @@ convert <chunks> <exp_name> [gpu_ids]
 It defaults to dataset `recam_lerobot`, cameras `01,02`, and three attempts per
 video. Override these with `DROID_NORMALS_DATASET_NAME`,
 `DROID_NORMALS_CAMERAS`, and `DROID_NORMALS_MAX_ATTEMPTS`.
+
+NormalCrafter's internal tensor-shape messages, dependency warnings, and tqdm
+bars are hidden by default. Worker plans, per-video start/save timing,
+retry/failure messages, and final summaries remain visible. Set
+`DROID_NORMALS_VERBOSE_INFERENCE=1` only when debugging model internals.
