@@ -29,13 +29,13 @@ Pass the Miniforge root explicitly. It must be the directory containing
 MF=/xxxxxx/miniforge/xxxx
 
 bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
-  download 0-3 recam_lerobot owner/recam_lerobot 01,02
+  download 0-3 owner/recam_lerobot
 
 bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
   check normalcrafter_v1 0
 
 bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
-  convert 0-3 recam_lerobot normalcrafter_v1 all 01,02 3
+  convert 0-3 normalcrafter_v1 all
 ```
 
 `download` uses Hugging Face's resumable snapshot downloader and materializes
@@ -82,3 +82,14 @@ runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
 episode list for bounded end-to-end tests. Set the subset and dataset-prefix
 variables to empty strings only when a
 standalone DROID dataset has `videos/` directly at its root.
+
+The high-level command intentionally mirrors `droid-metric-depth`:
+
+```text
+check <exp_name> [gpu_id]
+convert <chunks> <exp_name> [gpu_ids]
+```
+
+It defaults to dataset `recam_lerobot`, cameras `01,02`, and three attempts per
+video. Override these with `DROID_NORMALS_DATASET_NAME`,
+`DROID_NORMALS_CAMERAS`, and `DROID_NORMALS_MAX_ATTEMPTS`.

@@ -3,15 +3,20 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+DATASET_NAME="${DROID_NORMALS_DATASET_NAME:-recam_lerobot}"
+DATASET_DIR="$PROJECT_ROOT/DATA/$DATASET_NAME"
+CAMERAS="${DROID_NORMALS_CAMERAS:-01,02}"
+MAX_ATTEMPTS="${DROID_NORMALS_MAX_ATTEMPTS:-3}"
 
 usage() {
   echo "Usage:"
-  echo "  bash $0 [--miniforge-home PATH] download <chunks> <dataset_name> <repo_id> [cameras]"
+  echo "  bash $0 [--miniforge-home PATH] download <chunks> [repo_id]"
   echo "  bash $0 [--miniforge-home PATH] install <exp_name>"
   echo "  bash $0 [--miniforge-home PATH] check <exp_name> [gpu_id]"
-  echo "  bash $0 [--miniforge-home PATH] convert <chunks> <dataset_name> <exp_name> [gpu_ids] [cameras] [max_attempts]"
+  echo "  bash $0 [--miniforge-home PATH] convert <chunks> <exp_name> [gpu_ids]"
   echo
-  echo "Paths are relative to the ReCam root containing droid_normals: ./DATA/<dataset_name> and ./Res/<exp_name>."
+  echo "Default dataset: ./DATA/$DATASET_NAME (override with DROID_NORMALS_DATASET_NAME)."
+  echo "Default cameras/retries: $CAMERAS / $MAX_ATTEMPTS."
 }
 
 check_name() {
@@ -35,13 +40,18 @@ if [[ ! -x "$MINIFORGE_HOME/bin/conda" ]]; then
   exit 1
 fi
 export PATH="$MINIFORGE_HOME/bin:$PATH"
+check_name "$DATASET_NAME"
 
 case "${1:-}" in
   download)
-    [[ $# -ge 4 && $# -le 5 ]] || { usage; exit 2; }
-    check_name "$3"
+    [[ $# -ge 2 && $# -le 3 ]] || { usage; exit 2; }
+    REPO_ID="${3:-${DROID_NORMALS_REPO_ID:-}}"
+    if [[ -z "$REPO_ID" ]]; then
+      echo "ERROR: pass repo_id or set DROID_NORMALS_REPO_ID." >&2
+      exit 2
+    fi
     exec bash "$SCRIPT_DIR/download_droid_rgb_inputs.sh" \
-      "$2" "$PROJECT_ROOT/DATA/$3" "$4" "${5:-01,02}"
+      "$2" "$DATASET_DIR" "$REPO_ID" "$CAMERAS"
     ;;
 
   install)
@@ -59,12 +69,11 @@ case "${1:-}" in
     ;;
 
   convert)
-    [[ $# -ge 4 && $# -le 7 ]] || { usage; exit 2; }
+    [[ $# -ge 3 && $# -le 4 ]] || { usage; exit 2; }
     check_name "$3"
-    check_name "$4"
     exec bash "$SCRIPT_DIR/run_droid_normals_conversion.sh" \
-      "$2" "$PROJECT_ROOT/DATA/$3" "${5:-all}" "$PROJECT_ROOT/Res/$4" \
-      "${6:-01,02}" "${7:-3}"
+      "$2" "$DATASET_DIR" "${4:-all}" "$PROJECT_ROOT/Res/$3" \
+      "$CAMERAS" "$MAX_ATTEMPTS"
     ;;
 
   *)
