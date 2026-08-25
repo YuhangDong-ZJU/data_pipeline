@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 usage() {
   echo "Usage:"
@@ -39,30 +40,30 @@ case "${1:-}" in
   download)
     [[ $# -ge 4 && $# -le 5 ]] || { usage; exit 2; }
     check_name "$3"
-    exec bash "$ROOT/download_droid_rgb_inputs.sh" \
-      "$2" "$ROOT/DATA/$3" "$4" "${5:-01,02}"
+    exec bash "$SCRIPT_DIR/download_droid_rgb_inputs.sh" \
+      "$2" "$PROJECT_ROOT/DATA/$3" "$4" "${5:-01,02}"
     ;;
 
   install)
     [[ $# -eq 2 ]] || { usage; exit 2; }
     check_name "$2"
-    exec bash "$ROOT/install_normalcrafter.sh" "$ROOT/Res/$2"
+    exec bash "$SCRIPT_DIR/install_normalcrafter.sh" "$PROJECT_ROOT/Res/$2"
     ;;
 
   check)
     [[ $# -ge 2 && $# -le 3 ]] || { usage; exit 2; }
     check_name "$2"
     export DROID_NORMALS_CHECK_ONLY=1
-    exec bash "$ROOT/run_droid_normals_conversion.sh" \
-      "0" "$ROOT/DATA/.check" "${3:-0}" "$ROOT/Res/$2" "01" "1"
+    exec bash "$SCRIPT_DIR/run_droid_normals_conversion.sh" \
+      "0" "$PROJECT_ROOT/DATA/.check" "${3:-0}" "$PROJECT_ROOT/Res/$2" "01" "1"
     ;;
 
   convert)
     [[ $# -ge 4 && $# -le 7 ]] || { usage; exit 2; }
     check_name "$3"
     check_name "$4"
-    exec bash "$ROOT/run_droid_normals_conversion.sh" \
-      "$2" "$ROOT/DATA/$3" "${5:-all}" "$ROOT/Res/$4" \
+    exec bash "$SCRIPT_DIR/run_droid_normals_conversion.sh" \
+      "$2" "$PROJECT_ROOT/DATA/$3" "${5:-all}" "$PROJECT_ROOT/Res/$4" \
       "${6:-01,02}" "${7:-3}"
     ;;
 

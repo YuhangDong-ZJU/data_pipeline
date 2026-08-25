@@ -4,10 +4,10 @@ All commands are launched from `droid_normals/run_droid_normals.sh`. Its managed
 paths are fixed to:
 
 ```text
-droid_normals/DATA/<dataset_name>
-droid_normals/Res/<exp_name>/NormalCrafter
-droid_normals/Res/<exp_name>/hf_cache
-droid_normals/Res/<exp_name>/logs
+DATA/<dataset_name>
+Res/<exp_name>/NormalCrafter
+Res/<exp_name>/hf_cache
+Res/<exp_name>/logs
 ```
 
 Pass the Miniforge root explicitly. It must be the directory containing

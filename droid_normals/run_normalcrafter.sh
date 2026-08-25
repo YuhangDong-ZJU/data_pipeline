@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-WORK_DIR="${NORMALCRAFTER_WORK_DIR:-$ROOT/Res/${NORMALCRAFTER_EXP_NAME:-default}}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+WORK_DIR="${NORMALCRAFTER_WORK_DIR:-$PROJECT_ROOT/Res/${NORMALCRAFTER_EXP_NAME:-default}}"
 NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$WORK_DIR/NormalCrafter}"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 
@@ -28,6 +29,6 @@ if [[ ! -f "$NORMALCRAFTER_ROOT/normalcrafter/normal_crafter_ppl.py" ]]; then
 fi
 
 exec "$NORMALCRAFTER_PYTHON" \
-  "$ROOT/annotate_normals_normalcrafter.py" \
+  "$SCRIPT_DIR/annotate_normals_normalcrafter.py" \
   --normalcrafter-root "$NORMALCRAFTER_ROOT" \
   "$@"
