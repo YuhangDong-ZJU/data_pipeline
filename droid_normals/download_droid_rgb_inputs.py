@@ -37,12 +37,20 @@ def normalize_camera(value: str) -> str:
     raise ValueError(f"Invalid camera selector: {value}")
 
 
+def normalize_prefix(value: str) -> str:
+    parts = [part for part in value.strip("/").split("/") if part]
+    if any(part in {".", ".."} for part in parts):
+        raise ValueError(f"Invalid dataset prefix: {value}")
+    return "/".join(parts)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_id")
     parser.add_argument("chunks")
     parser.add_argument("download_dir", type=Path)
     parser.add_argument("--cameras", nargs="+", default=["01", "02"])
+    parser.add_argument("--prefix", default="real_world/droid")
     parser.add_argument("--revision")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--dry-run", action="store_true")
@@ -53,12 +61,14 @@ def main() -> None:
     args = parse_args()
     chunks = parse_chunks(args.chunks)
     cameras = sorted({normalize_camera(camera) for camera in args.cameras})
+    prefix = normalize_prefix(args.prefix)
     if args.workers < 1:
         raise ValueError("--workers must be positive")
 
-    patterns = ["meta/**"]
+    base = f"{prefix}/" if prefix else ""
+    patterns = [f"{base}meta/**"]
     patterns.extend(
-        f"videos/chunk-{chunk:03d}/{camera}/*.mp4"
+        f"{base}videos/chunk-{chunk:03d}/{camera}/*.mp4"
         for chunk in chunks
         for camera in cameras
     )
@@ -67,6 +77,7 @@ def main() -> None:
     print(f"Revision:    {args.revision or 'main'}")
     print(f"Chunks:      {', '.join(f'{chunk:03d}' for chunk in chunks)}")
     print(f"Cameras:     {', '.join(cameras)}")
+    print(f"Prefix:      {prefix or '<dataset root>'}")
     print(f"Destination: {download_dir}")
     if args.dry_run:
         for pattern in patterns:
@@ -85,12 +96,13 @@ def main() -> None:
         max_workers=args.workers,
     )
 
+    dataset_root = download_dir / prefix if prefix else download_dir
     missing: list[Path] = []
     video_count = 0
     total_bytes = 0
     for chunk in chunks:
         for camera in cameras:
-            camera_dir = download_dir / "videos" / f"chunk-{chunk:03d}" / camera
+            camera_dir = dataset_root / "videos" / f"chunk-{chunk:03d}" / camera
             videos = sorted(camera_dir.glob("episode_*.mp4"))
             if not videos:
                 missing.append(camera_dir)

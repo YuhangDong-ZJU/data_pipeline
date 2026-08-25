@@ -13,6 +13,7 @@ CHUNKS="$1"
 DOWNLOAD_DIR="$2"
 REPO_ID="$3"
 CAMERAS="${4:-01,02}"
+DATASET_PREFIX="${DROID_NORMALS_DATASET_PREFIX-real_world/droid}"
 ENV_NAME="${DROID_NORMALS_DOWNLOAD_ENV_NAME:-droid_normals_download}"
 
 if [[ -n "${MINIFORGE_HOME:-}" ]]; then
@@ -37,4 +38,5 @@ exec conda run --no-capture-output -n "$ENV_NAME" \
   python "$SCRIPT_DIR/download_droid_rgb_inputs.py" \
   "$REPO_ID" "$CHUNKS" "$DOWNLOAD_DIR" \
   --cameras "${CAMERA_ARRAY[@]}" \
+  --prefix "$DATASET_PREFIX" \
   --workers "${DROID_NORMALS_DOWNLOAD_WORKERS:-8}"

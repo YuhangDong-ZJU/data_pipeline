@@ -32,6 +32,11 @@ class ChunkParsingTest(unittest.TestCase):
     def test_download_chunk_forms(self) -> None:
         self.assertEqual(downloader.parse_chunks("0,2,5-7"), [0, 2, 5, 6, 7])
 
+    def test_nested_dataset_prefix(self) -> None:
+        self.assertEqual(downloader.normalize_prefix("/real_world/droid/"), "real_world/droid")
+        with self.assertRaises(ValueError):
+            downloader.normalize_prefix("../droid")
+
 
 class ResumeSchedulerTest(unittest.TestCase):
     def make_task(self, root: Path, index: int) -> worker.NormalTask:

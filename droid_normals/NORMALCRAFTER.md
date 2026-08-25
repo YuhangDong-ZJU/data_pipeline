@@ -18,6 +18,10 @@ Res/<exp_name>/hf_cache
 Res/<exp_name>/logs
 ```
 
+The production default is `DATA/recam_lerobot/real_world/droid`. The launcher
+passes `real_world/droid` as the only selected subset, so other real-world or
+simulation datasets below `recam_lerobot` are not annotated accidentally.
+
 Pass the Miniforge root explicitly. It must be the directory containing
 `bin/conda`, for example `/xxxxxx/miniforge/xxxx/`:
 
@@ -25,17 +29,17 @@ Pass the Miniforge root explicitly. It must be the directory containing
 MF=/xxxxxx/miniforge/xxxx
 
 bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
-  download 0-3 droid_18k owner/droid_18k 01,02
+  download 0-3 recam_lerobot owner/recam_lerobot 01,02
 
 bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
   check normalcrafter_v1 0
 
 bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
-  convert 0-3 droid_18k normalcrafter_v1 all 01,02 3
+  convert 0-3 recam_lerobot normalcrafter_v1 all 01,02 3
 ```
 
 `download` uses Hugging Face's resumable snapshot downloader and materializes
-only `meta/**` and the selected chunk/camera MP4s. The repository ID is explicit
+only `real_world/droid/meta/**` and the selected DROID chunk/camera MP4s. The repository ID is explicit
 because the private/filtered 18K RGB dataset cannot be inferred from its local
 directory name.
 
@@ -73,4 +77,6 @@ export DROID_NORMALS_GLOBAL_WORKER_OFFSET=0
 If machines receive disjoint chunks, no global settings are necessary. Useful
 runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
 `DROID_NORMALS_RETRY_DELAY_SECONDS`, `DROID_NORMALS_MAX_RES`,
-`DROID_NORMALS_CRF`, and `DROID_NORMALS_CPU_OFFLOAD`.
+`DROID_NORMALS_CRF`, `DROID_NORMALS_CPU_OFFLOAD`, `DROID_NORMALS_SUBSETS`, and
+`DROID_NORMALS_DATASET_PREFIX`. Set the last two to empty strings only when a
+standalone DROID dataset has `videos/` directly at its root.
