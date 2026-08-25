@@ -551,7 +551,7 @@ class NormalCrafterRunner:
         if "output_type" not in inspect.signature(NormalCrafterPipeline.__call__).parameters:
             raise RuntimeError(
                 "NormalCrafter long-video patch is not applied. "
-                "See droid_normals/README.md."
+                "See droid_normals/NORMALCRAFTER.md."
             )
 
         self.torch = torch
