@@ -1,0 +1,66 @@
+diff --git a/normalcrafter/normal_crafter_ppl.py b/normalcrafter/normal_crafter_ppl.py
+index 166c247..701b33d 100644
+--- a/normalcrafter/normal_crafter_ppl.py
++++ b/normalcrafter/normal_crafter_ppl.py
+@@ -160,6 +160,7 @@ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+         time_step_size: Optional[int] = 1,
+         window_size: Optional[int] = 1,
+         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
++        output_type: str = "np",
+         return_dict: bool = True
+     ):
+         images, pad_HWs = self.pad_image(images)
+@@ -185,7 +186,8 @@ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+         motion_bucket_id = 127
+         noise_aug_strength = 0.
+         num_videos_per_prompt = 1
+-        output_type = "np"
++        if output_type not in {"np", "latent"}:
++            raise ValueError("output_type must be either 'np' or 'latent'")
+         data_keys = ["normal"]
+         use_linear_merge = True
+         determineTrain = True
+@@ -231,7 +233,11 @@ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+             return ses
+         ses = get_ses(num_frames)
+ 
++        # Allocate the complete latent sequence once.  The original implementation
++        # rebuilt an ever-growing tensor with torch.cat for every temporal window,
++        # which copies the already-computed prefix repeatedly for long videos.
+         pred = None
++        previous_se = None
+         for i, se in enumerate(ses):
+             window_num_frames = window_size
+             window_image_embeddings = image_embeddings[se[0]:se[1]]
+@@ -242,9 +248,8 @@ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+             if i == 0 or time_step_size == window_size:
+                 to_replace_latents = None
+             else:
+-                last_se = ses[i-1]
+-                num_to_replace_latents = last_se[1] - se[0]
+-                to_replace_latents = pred[:, -num_to_replace_latents:]
++                num_to_replace_latents = previous_se[1] - se[0]
++                to_replace_latents = pred[:, se[0]:previous_se[1]]
+ 
+             latents = self.generate(
+                 num_inference_steps,
+@@ -271,9 +276,16 @@ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+                 latents[:, :num_img_condition] = to_replace_latents * weight + latents[:, :num_img_condition] * (1 - weight)
+ 
+             if pred is None:
+-                pred = latents
+-            else:
+-                pred = torch.cat([pred[:, :se[0]], latents], dim=1)
++                pred = torch.empty(
++                    (latents.shape[0], num_frames, *latents.shape[2:]),
++                    dtype=latents.dtype,
++                    device=latents.device,
++                )
++            pred[:, se[0]:se[1]].copy_(latents)
++            previous_se = se
++
++        if pred is None:
++            raise RuntimeError("NormalCrafter produced no temporal windows")
+ 
+         if not output_type == "latent":
+             # cast back to fp16 if needed
