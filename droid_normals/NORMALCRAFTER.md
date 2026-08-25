@@ -1,7 +1,13 @@
 # DROID normals — NormalCrafter pipeline
 
-All commands are launched from `droid_normals/run_droid_normals.sh`. Its managed
-paths are fixed to:
+Run all commands after entering the ReCam project root. For example:
+
+```bash
+cd /path/to/ReCam
+```
+
+Commands are launched from `droid_normals/run_droid_normals.sh`. Managed paths
+are relative to that current directory:
 
 ```text
 DATA/<dataset_name>

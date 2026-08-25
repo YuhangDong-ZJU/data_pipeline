@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd -- "${RECAM_ROOT:-$PWD}" && pwd)"
 WORK_DIR="${NORMALCRAFTER_WORK_DIR:-$PROJECT_ROOT/Res/${NORMALCRAFTER_EXP_NAME:-default}}"
 NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$WORK_DIR/NormalCrafter}"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
