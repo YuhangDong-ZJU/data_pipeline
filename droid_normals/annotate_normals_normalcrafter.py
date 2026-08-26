@@ -9,12 +9,14 @@ import json
 import os
 import queue
 import re
+import signal
 import socket
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import dataclass
@@ -128,8 +130,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stale-lock-hours",
         type=float,
-        default=24.0,
-        help="Replace output locks older than this many hours; 0 disables replacement",
+        default=0.25,
+        help=(
+            "Replace remote/unknown output locks whose heartbeat is older than this many "
+            "hours; dead same-host owners are reclaimed immediately; 0 disables age fallback"
+        ),
+    )
+    parser.add_argument(
+        "--lock-heartbeat-seconds",
+        type=float,
+        default=30.0,
+        help="Refresh owned output locks at this interval; 0 disables heartbeats",
     )
 
     parser.add_argument("--unet-path", default="Yanrui95/NormalCrafter")
@@ -192,6 +203,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--crf must be in [0, 51]")
     if args.stale_lock_hours < 0:
         raise ValueError("--stale-lock-hours cannot be negative")
+    if args.lock_heartbeat_seconds < 0:
+        raise ValueError("--lock-heartbeat-seconds cannot be negative")
     if args.max_attempts < 1:
         raise ValueError("--max-attempts must be at least 1")
     if args.retry_delay_seconds < 0:
@@ -414,49 +427,192 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     os.replace(part, path)
 
 
+def linux_boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def linux_process_start_ticks(pid: int) -> str | None:
+    try:
+        value = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    closing_parenthesis = value.rfind(")")
+    if closing_parenthesis < 0:
+        return None
+    fields_after_command = value[closing_parenthesis + 2 :].split()
+    # /proc/<pid>/stat field 3 starts at index 0 here; process start time is field 22.
+    return fields_after_command[19] if len(fields_after_command) > 19 else None
+
+
+def process_exists(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class OutputLock:
-    def __init__(self, output: Path, stale_hours: float) -> None:
+    def __init__(
+        self,
+        output: Path,
+        stale_hours: float,
+        heartbeat_seconds: float = 30.0,
+    ) -> None:
         self.path = output.with_name(f".{output.name}.lock")
         self.stale_seconds = stale_hours * 3600.0
+        self.heartbeat_seconds = heartbeat_seconds
+        self.hostname = socket.gethostname()
+        self.boot_id = linux_boot_id()
+        self.process_start_ticks = linux_process_start_ticks(os.getpid())
+        self.token = uuid.uuid4().hex
         self.acquired = False
+        self.recovered_stale_lock = False
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_thread: threading.Thread | None = None
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "host": self.hostname,
+            "pid": os.getpid(),
+            "boot_id": self.boot_id,
+            "process_start_ticks": self.process_start_ticks,
+            "token": self.token,
+            "created_unix": time.time(),
+        }
+
+    def _read_payload(self) -> dict[str, Any] | None:
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _same_host_owner_is_alive(self, payload: dict[str, Any] | None) -> bool | None:
+        if payload is None or payload.get("host") != self.hostname:
+            return None
+        if self.boot_id and payload.get("boot_id") not in (None, self.boot_id):
+            return False
+        try:
+            pid = int(payload["pid"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not process_exists(pid):
+            return False
+        expected_start = payload.get("process_start_ticks")
+        if expected_start is not None:
+            current_start = linux_process_start_ticks(pid)
+            if current_start is None:
+                return False
+            return str(expected_start) == current_start
+        return True
+
+    def _is_stale(self, payload: dict[str, Any] | None, age: float) -> bool:
+        owner_alive = self._same_host_owner_is_alive(payload)
+        if owner_alive is not None:
+            return not owner_alive
+        return bool(self.stale_seconds and age > self.stale_seconds)
+
+    def _owns_lock(self) -> bool:
+        payload = self._read_payload()
+        return payload is not None and payload.get("token") == self.token
+
+    def _heartbeat(self) -> None:
+        while not self._heartbeat_stop.wait(self.heartbeat_seconds):
+            if not self._owns_lock():
+                return
+            try:
+                os.utime(self.path, None)
+            except FileNotFoundError:
+                return
+
+    def _start_heartbeat(self) -> None:
+        if self.heartbeat_seconds <= 0:
+            return
+        self._heartbeat_thread = threading.Thread(
+            target=self._heartbeat,
+            name=f"lock-heartbeat-{self.path.stem}",
+            daemon=True,
+        )
+        self._heartbeat_thread.start()
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        for _ in range(2):
+        for _ in range(4):
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
             except FileExistsError:
-                if not self.stale_seconds:
-                    return False
                 try:
-                    age = time.time() - self.path.stat().st_mtime
+                    snapshot = self.path.read_bytes()
+                    stat = self.path.stat()
                 except FileNotFoundError:
                     continue
-                if age <= self.stale_seconds:
+                try:
+                    payload = json.loads(snapshot)
+                    if not isinstance(payload, dict):
+                        payload = None
+                except json.JSONDecodeError:
+                    payload = None
+                age = max(0.0, time.time() - stat.st_mtime)
+                if not self._is_stale(payload, age):
                     return False
                 try:
+                    if self.path.read_bytes() != snapshot:
+                        continue
                     self.path.unlink()
                 except FileNotFoundError:
                     pass
+                self.recovered_stale_lock = True
                 continue
-            with os.fdopen(fd, "w", encoding="utf-8") as file:
-                json.dump(
-                    {
-                        "host": socket.gethostname(),
-                        "pid": os.getpid(),
-                        "created_unix": time.time(),
-                    },
-                    file,
-                )
-                file.write("\n")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as file:
+                    json.dump(self._payload(), file, sort_keys=True)
+                    file.write("\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+            except BaseException:
+                self.path.unlink(missing_ok=True)
+                raise
             self.acquired = True
+            self._start_heartbeat()
             return True
         return False
 
     def release(self) -> None:
-        if self.acquired:
+        if not self.acquired:
+            return
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join()
+        if self._owns_lock():
             self.path.unlink(missing_ok=True)
-            self.acquired = False
+        self.acquired = False
+
+
+def cleanup_orphan_task_parts(task: NormalTask) -> tuple[int, int]:
+    candidates: set[Path] = set(
+        task.output_path.parent.glob(f".{task.output_path.stem}.*.part.mp4")
+    )
+    failed_metadata_path = task.metadata_path.with_suffix(".failed.json")
+    for metadata_path in (task.metadata_path, failed_metadata_path):
+        candidates.update(metadata_path.parent.glob(f".{metadata_path.name}.*.part"))
+    removed = 0
+    removed_bytes = 0
+    for path in candidates:
+        try:
+            removed_bytes += path.stat().st_size
+            path.unlink()
+            removed += 1
+        except FileNotFoundError:
+            continue
+    return removed, removed_bytes
 
 
 class AsyncMp4Writer:
@@ -473,7 +629,10 @@ class AsyncMp4Writer:
         queue_size: int = 3,
     ) -> None:
         self.path = path
-        self.tmp_path = path.with_name(f".{path.stem}.{os.getpid()}.part.mp4")
+        safe_host = re.sub(r"[^A-Za-z0-9_.-]+", "_", socket.gethostname())
+        self.tmp_path = path.with_name(
+            f".{path.stem}.{safe_host}.{os.getpid()}.{uuid.uuid4().hex}.part.mp4"
+        )
         self.width = width
         self.height = height
         self.fps = fps
@@ -640,6 +799,7 @@ class NormalCrafterRunner:
                 )
 
             self.torch = torch
+            self.inference_dtype = torch.float16
             self.set_seed = set_seed
             self.read_video_frames = read_video_frames
             load_started = time.monotonic()
@@ -670,6 +830,25 @@ class NormalCrafterRunner:
             self.pipe.enable_xformers_memory_efficient_attention()
         except Exception as exc:
             print(f"WARNING: xFormers is unavailable: {exc}", flush=True)
+
+    def restore_model_dtypes(self) -> list[str]:
+        restored: list[str] = []
+        for name in ("vae", "unet"):
+            module = getattr(self.pipe, name)
+            if module.dtype != self.inference_dtype:
+                module.to(dtype=self.inference_dtype)
+                restored.append(name)
+        return restored
+
+    def reset_after_attempt(self) -> list[str]:
+        """Release cached task allocations and restore dtypes after success or failure."""
+        torch = self.torch
+        gc.collect()
+        torch.cuda.empty_cache()
+        restored = self.restore_model_dtypes()
+        gc.collect()
+        torch.cuda.empty_cache()
+        return restored
 
     def load_video(self, task: NormalTask, args: argparse.Namespace) -> tuple[list[Any], float]:
         if self.verbose_inference:
@@ -715,6 +894,9 @@ class NormalCrafterRunner:
         torch = self.torch
         import torch.nn.functional as functional
 
+        restored = self.restore_model_dtypes()
+        if restored:
+            print(f"RECOVERED model dtype before inference: {','.join(restored)}", flush=True)
         self.set_seed(args.seed)
         input_width, input_height = frames[0].size
         torch.cuda.reset_peak_memory_stats()
@@ -799,7 +981,11 @@ def process_task(
     args: argparse.Namespace,
     attempt: int,
 ) -> str:
-    lock = OutputLock(task.output_path, args.stale_lock_hours)
+    lock = OutputLock(
+        task.output_path,
+        args.stale_lock_hours,
+        args.lock_heartbeat_seconds,
+    )
     if not lock.acquire():
         print(f"LOCKED: {task.output_path}", flush=True)
         return "locked"
@@ -807,6 +993,14 @@ def process_task(
     writer: AsyncMp4Writer | None = None
     started = time.monotonic()
     try:
+        removed_parts, removed_bytes = cleanup_orphan_task_parts(task)
+        if lock.recovered_stale_lock or removed_parts:
+            print(
+                f"RECOVERED: {task.output_path} | "
+                f"stale_lock={int(lock.recovered_stale_lock)} | "
+                f"orphan_parts={removed_parts} ({removed_bytes} bytes)",
+                flush=True,
+            )
         if task_is_complete(task) and not args.overwrite:
             print(f"SKIP: {task.output_path}", flush=True)
             return "skipped"
@@ -843,6 +1037,7 @@ def process_task(
                 "cpu_offload": args.cpu_offload,
                 "crf": args.crf,
                 "pixel_format": "yuv420p",
+                "pytorch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
             },
             "model_load_seconds": runner.load_seconds,
             "attempt": attempt,
@@ -903,6 +1098,11 @@ def print_plan(
 def main() -> None:
     args = parse_args()
     validate_args(args)
+
+    def handle_sigterm(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt("received SIGTERM")
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
     if not args.dry_run:
         for executable in ("ffmpeg", "ffprobe"):
             if not any(
@@ -974,6 +1174,12 @@ def main() -> None:
                 finally:
                     if frames is not None:
                         del frames
+                    restored = runner.reset_after_attempt()
+                    if restored:
+                        print(
+                            f"RECOVERED model dtype after attempt: {','.join(restored)}",
+                            flush=True,
+                        )
 
             if final_error is not None:
                 failed += 1

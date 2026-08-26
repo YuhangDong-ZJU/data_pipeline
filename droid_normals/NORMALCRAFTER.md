@@ -57,6 +57,19 @@ published `status=complete` JSON, then redistributes only unfinished videos over
 the available workers. Each video is attempted three times by default; if a
 worker process still exits nonzero, the launcher performs a second resumable
 worker pass. Logs are written per pass and GPU below `Res/<exp_name>/logs`.
+Each attempt restores the model's FP16 invariant and releases unused CUDA cache
+before the next video. The launcher defaults to
+`PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128` to limit long-run allocator
+fragmentation. A CUDA OOM therefore remains local to one attempt instead of
+leaving the persistent VAE in FP32 and poisoning all later tasks.
+
+Output locks contain a host, PID, Linux boot/process identity and unique owner
+token. A dead owner on the same host is reclaimed immediately. For shared
+multi-machine storage, live workers heartbeat every 30 seconds and an unknown
+owner defaults to a 15-minute lease. Once a worker owns a recovered task, it
+removes only that episode's orphan `.part.mp4` and atomic-JSON part files. Worker
+processes run in separate process groups, so `Ctrl+C` terminates their Python
+and FFmpeg children and lets normal lock/part cleanup run before exit.
 
 The output is written beside RGB as
 `videos/chunk-*/observation.images.normal_*/episode_*.mp4`. Defaults are
@@ -78,9 +91,10 @@ If machines receive disjoint chunks, no global settings are necessary. Useful
 runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
 `DROID_NORMALS_RETRY_DELAY_SECONDS`, `DROID_NORMALS_MAX_RES`,
 `DROID_NORMALS_CRF`, `DROID_NORMALS_CPU_OFFLOAD`, `DROID_NORMALS_SUBSETS`, and
-`DROID_NORMALS_DATASET_PREFIX`. `DROID_NORMALS_EPISODES` accepts a comma-separated
-episode list for bounded end-to-end tests. Set the subset and dataset-prefix
-variables to empty strings only when a
+`DROID_NORMALS_DATASET_PREFIX`. Lock lease behavior can be overridden with
+`DROID_NORMALS_STALE_LOCK_HOURS` and `DROID_NORMALS_LOCK_HEARTBEAT_SECONDS`.
+`DROID_NORMALS_EPISODES` accepts a comma-separated episode list for bounded
+end-to-end tests. Set the subset and dataset-prefix variables to empty strings only when a
 standalone DROID dataset has `videos/` directly at its root.
 
 The high-level command intentionally mirrors `droid-metric-depth`:

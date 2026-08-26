@@ -69,6 +69,7 @@ else
 fi
 export HF_HOME HF_HUB_CACHE="$HF_HOME/hub" HF_XET_HIGH_PERFORMANCE=1
 export OMP_NUM_THREADS="${DROID_NORMALS_OMP_NUM_THREADS:-4}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 mkdir -p "$HF_HOME" "$LOG_DIR"
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -79,6 +80,67 @@ if [[ ! -f "$NORMALCRAFTER_ROOT/normalcrafter/normal_crafter_ppl.py" ]]; then
   echo "ERROR: NormalCrafter checkout is missing: $NORMALCRAFTER_ROOT" >&2
   exit 1
 fi
+if ! command -v setsid >/dev/null 2>&1; then
+  echo "ERROR: setsid is required for reliable worker shutdown." >&2
+  exit 1
+fi
+
+PIDS=()
+terminate_worker_groups() {
+  local pid
+  local any_running=0
+  for pid in "${PIDS[@]}"; do
+    if kill -0 -- "-$pid" 2>/dev/null; then
+      kill -TERM -- "-$pid" 2>/dev/null || true
+      any_running=1
+    fi
+  done
+  if [[ "$any_running" -eq 0 ]]; then
+    PIDS=()
+    return
+  fi
+  echo "Stopping NormalCrafter worker groups..." >&2
+  for _ in {1..15}; do
+    any_running=0
+    for pid in "${PIDS[@]}"; do
+      if kill -0 -- "-$pid" 2>/dev/null; then
+        any_running=1
+        break
+      fi
+    done
+    if [[ "$any_running" -eq 0 ]]; then
+      break
+    fi
+    sleep 1
+  done
+  for pid in "${PIDS[@]}"; do
+    if kill -0 -- "-$pid" 2>/dev/null; then
+      kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+  done
+  for pid in "${PIDS[@]}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  PIDS=()
+}
+
+handle_shutdown() {
+  local status="$1"
+  trap - INT TERM EXIT
+  terminate_worker_groups
+  exit "$status"
+}
+
+cleanup_on_exit() {
+  local status=$?
+  trap - EXIT
+  terminate_worker_groups
+  exit "$status"
+}
+
+trap 'handle_shutdown 130' INT
+trap 'handle_shutdown 143' TERM
+trap cleanup_on_exit EXIT
 
 if [[ "$GPU_IDS" == "all" ]]; then
   GPU_IDS="$(nvidia-smi --query-gpu=index --format=csv,noheader | paste -sd, -)"
@@ -162,6 +224,7 @@ echo "Global shards:    $GLOBAL_WORKERS (local offset $WORKER_OFFSET)"
 echo "Attempts/video:   $MAX_ATTEMPTS"
 echo "Process passes:   $WORKER_PASSES"
 echo "Checkpoint cache: $HF_HOME"
+echo "CUDA allocator:   $PYTORCH_CUDA_ALLOC_CONF"
 
 RUN_TAG="$(date +%Y%m%d-%H%M%S)-chunks-${CHUNKS//,/_}"
 WORKER_MODE_ARGS=()
@@ -177,9 +240,7 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
     GPU_ID="${GPU_ARRAY[$LOCAL_INDEX]}"
     SHARD_INDEX=$((WORKER_OFFSET + LOCAL_INDEX))
     LOG_FILE="$LOG_DIR/${RUN_TAG}-pass${PASS}-gpu${GPU_ID}-shard${SHARD_INDEX}.log"
-    (
-      set -o pipefail
-      CUDA_VISIBLE_DEVICES="$GPU_ID" "$PYTHON" "$WORKER" "$DATASET_DIR" \
+    CUDA_VISIBLE_DEVICES="$GPU_ID" setsid "$PYTHON" "$WORKER" "$DATASET_DIR" \
         --normalcrafter-root "$NORMALCRAFTER_ROOT" \
         --chunks "$CHUNKS" \
         --cameras "${CAMERA_ARRAY[@]}" \
@@ -189,7 +250,8 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
         --shard-index "$SHARD_INDEX" \
         --max-attempts "$MAX_ATTEMPTS" \
         --retry-delay-seconds "${DROID_NORMALS_RETRY_DELAY_SECONDS:-5}" \
-        --stale-lock-hours "${DROID_NORMALS_STALE_LOCK_HOURS:-24}" \
+        --stale-lock-hours "${DROID_NORMALS_STALE_LOCK_HOURS:-0.25}" \
+        --lock-heartbeat-seconds "${DROID_NORMALS_LOCK_HEARTBEAT_SECONDS:-30}" \
         --cpu-offload "${DROID_NORMALS_CPU_OFFLOAD:-none}" \
         --max-res "${DROID_NORMALS_MAX_RES:-1024}" \
         --output-width "${DROID_NORMALS_OUTPUT_WIDTH:-1280}" \
@@ -198,17 +260,19 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
         --ffmpeg-preset "${DROID_NORMALS_FFMPEG_PRESET:-veryfast}" \
         --continue-on-error \
         "${WORKER_MODE_ARGS[@]}" \
-        2>&1 | tee "$LOG_FILE"
-    ) &
+        > >(tee "$LOG_FILE") 2>&1 &
     PIDS+=("$!")
   done
 
   PASS_FAILED=0
-  for PID in "${PIDS[@]}"; do
+  for PID_INDEX in "${!PIDS[@]}"; do
+    PID="${PIDS[$PID_INDEX]}"
     if ! wait "$PID"; then
       PASS_FAILED=1
     fi
+    unset "PIDS[$PID_INDEX]"
   done
+  PIDS=()
   if [[ "$PASS_FAILED" -eq 0 ]]; then
     FINAL_FAILED=0
     break
