@@ -31,11 +31,26 @@ class SubsetParsingTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             downloader.normalize_subsets(["all", "real_world/droid"])
 
-    def test_allow_pattern_is_limited_to_one_subset(self) -> None:
+    def test_full_subset_pattern_is_limited_to_one_subset(self) -> None:
         self.assertEqual(
-            downloader.allow_patterns("real_world/droid"),
+            downloader.build_allow_patterns("real_world/droid", [], None, None),
             ["real_world/droid/**"],
         )
+
+    def test_chunk_ranges_and_modality_aliases(self) -> None:
+        self.assertEqual(downloader.parse_chunks("0,2,5-7,chunk-009"), [0, 2, 5, 6, 7, 9])
+        self.assertEqual(
+            downloader.normalize_modalities(["parquet,rgb_01", "observation.images.normal_02"]),
+            [
+                "data",
+                "videos/observation.images.rgb_01",
+                "videos/observation.images.normal_02",
+            ],
+        )
+
+    def test_rejects_descending_chunk_range(self) -> None:
+        with self.assertRaises(ValueError):
+            downloader.parse_chunks("7-5")
 
 
 class FakeApi:
@@ -48,8 +63,29 @@ class FakeApi:
                 "real_world/droid/meta",
                 "real_world/droid/videos",
             ],
+            "real_world/droid/data": [
+                "real_world/droid/data/chunk-000",
+                "real_world/droid/data/chunk-001",
+            ],
+            "real_world/droid/meta": [],
+            "real_world/droid/videos": [
+                "real_world/droid/videos/chunk-000",
+                "real_world/droid/videos/chunk-001",
+            ],
+            "real_world/droid/videos/chunk-000": [
+                "real_world/droid/videos/chunk-000/observation.images.rgb_00",
+                "real_world/droid/videos/chunk-000/observation.images.rgb_01",
+            ],
+            "real_world/droid/videos/chunk-001": [
+                "real_world/droid/videos/chunk-001/observation.images.rgb_00",
+                "real_world/droid/videos/chunk-001/observation.images.rgb_01",
+            ],
             "simulation": ["simulation/libero"],
             "simulation/libero": ["simulation/libero/data"],
+            "simulation/libero/data": [
+                "simulation/libero/data/chunk-000",
+                "simulation/libero/data/chunk-001",
+            ],
             "misc": ["misc/not_a_dataset"],
             "misc/not_a_dataset": [],
         }
@@ -67,6 +103,65 @@ class SubsetDiscoveryTest(unittest.TestCase):
             downloader.discover_subsets(FakeApi(), "owner/repo", "commit"),
             ["real_world/droid", "simulation/libero"],
         )
+
+    def test_chunk_only_plan_includes_chunked_roots_and_metadata(self) -> None:
+        api = FakeApi()
+        layout = downloader.discover_subset_layout(
+            api, "owner/repo", "commit", "real_world/droid"
+        )
+        self.assertEqual(
+            downloader.build_allow_patterns("real_world/droid", [], [1], layout),
+            [
+                "real_world/droid/data/chunk-001/**",
+                "real_world/droid/meta/**",
+                "real_world/droid/videos/chunk-001/**",
+            ],
+        )
+
+    def test_chunk_only_plan_does_not_invent_missing_metadata(self) -> None:
+        api = FakeApi()
+        layout = downloader.discover_subset_layout(
+            api, "owner/repo", "commit", "simulation/libero"
+        )
+        self.assertEqual(
+            downloader.build_allow_patterns("simulation/libero", [], [0], layout),
+            ["simulation/libero/data/chunk-000/**"],
+        )
+
+    def test_exact_video_modality_and_data_patterns(self) -> None:
+        api = FakeApi()
+        layout = downloader.discover_subset_layout(
+            api, "owner/repo", "commit", "real_world/droid"
+        )
+        modalities = downloader.normalize_modalities(["data,rgb_01"])
+        self.assertEqual(
+            downloader.build_allow_patterns(
+                "real_world/droid", modalities, [0, 1], layout
+            ),
+            [
+                "real_world/droid/data/chunk-000/**",
+                "real_world/droid/data/chunk-001/**",
+                "real_world/droid/videos/chunk-000/observation.images.rgb_01/**",
+                "real_world/droid/videos/chunk-001/observation.images.rgb_01/**",
+            ],
+        )
+        downloader.validate_remote_nested_modalities(
+            api,
+            "owner/repo",
+            "commit",
+            "real_world/droid",
+            modalities,
+            [0, 1],
+            layout,
+        )
+
+    def test_missing_chunk_is_rejected_before_download(self) -> None:
+        api = FakeApi()
+        layout = downloader.discover_subset_layout(
+            api, "owner/repo", "commit", "real_world/droid"
+        )
+        with self.assertRaises(ValueError):
+            downloader.build_allow_patterns("real_world/droid", ["videos"], [5], layout)
 
 
 class DownloadRetryTest(unittest.TestCase):
@@ -91,6 +186,7 @@ class DownloadRetryTest(unittest.TestCase):
                 revision="commit",
                 destination=destination,
                 subset="real_world/droid",
+                patterns=["real_world/droid/meta/**"],
                 workers=2,
                 max_attempts=3,
                 retry_delay_seconds=5,
@@ -99,7 +195,7 @@ class DownloadRetryTest(unittest.TestCase):
 
             self.assertEqual(len(calls), 2)
             self.assertEqual(delays, [5])
-            self.assertEqual(calls[1]["allow_patterns"], ["real_world/droid/**"])
+            self.assertEqual(calls[1]["allow_patterns"], ["real_world/droid/meta/**"])
             self.assertEqual(calls[1]["local_dir"], destination)
             self.assertEqual(calls[1]["revision"], "commit")
 

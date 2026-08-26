@@ -13,6 +13,8 @@ usage() {
   echo "  bash $0 --miniforge-home /path/to/miniconda3 real_world/droid"
   echo "  bash $0 --miniforge-home /path/to/miniconda3 simulation/libero"
   echo "  bash $0 --miniforge-home /path/to/miniconda3 real_world/droid simulation/libero"
+  echo "  bash $0 --miniforge-home /path/to/miniconda3 real_world/droid --chunks 0-3"
+  echo "  bash $0 --miniforge-home /path/to/miniconda3 real_world/droid --chunks 0 --modalities data,rgb_01"
   echo "  bash $0 --miniforge-home /path/to/miniconda3 --list-subsets"
   echo
   echo "Default destination: <repository>/DATA/recam_lerobot"
