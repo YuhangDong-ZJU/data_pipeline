@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
 import json
 import os
 import queue
@@ -28,6 +29,12 @@ import numpy as np
 
 _STOP = object()
 _ABORT = object()
+NORMALCRAFTER_COMMIT = "75af9887a2cb14cd1ce3883c5773bc296565777c"
+DEFAULT_UNET_PATH = "Yanrui95/NormalCrafter"
+DEFAULT_UNET_REVISION = "7e24d68d86ae008fe08ef50b4e51cd2fc2c8cf57"
+DEFAULT_PRETRAIN_PATH = "stabilityai/stable-video-diffusion-img2vid-xt"
+DEFAULT_PRETRAIN_REVISION = "9e43909513c6714f1bc78bcb44d96e733cd242aa"
+ANNOTATION_CONFIG_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -143,11 +150,13 @@ def parse_args() -> argparse.Namespace:
         help="Refresh owned output locks at this interval; 0 disables heartbeats",
     )
 
-    parser.add_argument("--unet-path", default="Yanrui95/NormalCrafter")
+    parser.add_argument("--unet-path", default=DEFAULT_UNET_PATH)
+    parser.add_argument("--unet-revision", default=DEFAULT_UNET_REVISION)
     parser.add_argument(
         "--pretrain-path",
-        default="stabilityai/stable-video-diffusion-img2vid-xt",
+        default=DEFAULT_PRETRAIN_PATH,
     )
+    parser.add_argument("--pretrain-revision", default=DEFAULT_PRETRAIN_REVISION)
     parser.add_argument("--cpu-offload", choices=["none", "model", "sequential"], default="none")
     parser.add_argument("--process-length", type=int, default=-1)
     parser.add_argument("--target-fps", type=int, default=15)
@@ -355,34 +364,137 @@ def discover_tasks(args: argparse.Namespace) -> list[NormalTask]:
     return tasks
 
 
-def task_is_complete(task: NormalTask) -> bool:
+def annotation_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "version": ANNOTATION_CONFIG_VERSION,
+        "method": "NormalCrafter",
+        "normalcrafter_commit": NORMALCRAFTER_COMMIT,
+        "unet": {"path": args.unet_path, "revision": args.unet_revision},
+        "pretrain": {"path": args.pretrain_path, "revision": args.pretrain_revision},
+        "settings": {
+            "target_fps": args.target_fps,
+            "process_length": args.process_length,
+            "max_res": args.max_res,
+            "window_size": args.window_size,
+            "time_step_size": args.time_step_size,
+            "decode_chunk_size": args.decode_chunk_size,
+            "seed": args.seed,
+            "cpu_offload": args.cpu_offload,
+            "output_width": args.output_width,
+            "output_height": args.output_height,
+            "crf": args.crf,
+            "ffmpeg_preset": args.ffmpeg_preset,
+            "pixel_format": "yuv420p",
+        },
+    }
+
+
+def config_fingerprint(config: dict[str, Any]) -> str:
+    encoded = json.dumps(config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def has_mp4_signature(path: Path) -> bool:
     try:
-        if not task.output_path.is_file() or task.output_path.stat().st_size <= 0:
+        with path.open("rb") as file:
+            header = file.read(12)
+    except OSError:
+        return False
+    return len(header) == 12 and header[4:8] == b"ftyp"
+
+
+def legacy_config_matches(payload: dict[str, Any], expected: dict[str, Any]) -> bool:
+    """Accept compatible pre-fingerprint outputs without forcing a full relabel."""
+    if payload.get("method") != expected["method"]:
+        return False
+    if payload.get("normalcrafter_commit") != expected["normalcrafter_commit"]:
+        return False
+    stored_settings = payload.get("settings")
+    output = payload.get("output_video")
+    if not isinstance(stored_settings, dict) or not isinstance(output, dict):
+        return False
+    expected_settings = expected["settings"]
+    comparable = (
+        "target_fps",
+        "process_length",
+        "max_res",
+        "window_size",
+        "time_step_size",
+        "decode_chunk_size",
+        "seed",
+        "cpu_offload",
+        "crf",
+        "pixel_format",
+    )
+    if any(stored_settings.get(key) != expected_settings[key] for key in comparable):
+        return False
+    return (
+        int(output.get("width", -1)) == expected_settings["output_width"]
+        and int(output.get("height", -1)) == expected_settings["output_height"]
+    )
+
+
+def task_is_complete(task: NormalTask, expected_config: dict[str, Any] | None = None) -> bool:
+    try:
+        if not task.output_path.is_file() or not has_mp4_signature(task.output_path):
             return False
+        output_size = task.output_path.stat().st_size
         payload = json.loads(task.metadata_path.read_text(encoding="utf-8"))
         output = payload["output_video"]
-        return (
+        if not (
             payload.get("status") == "complete"
             and int(output["width"]) > 0
             and int(output["height"]) > 0
             and int(output["frames"]) > 0
+        ):
+            return False
+        recorded_output_size = output.get("size_bytes")
+        if recorded_output_size is not None and int(recorded_output_size) != output_size:
+            return False
+        recorded_task = payload.get("task")
+        recorded_input_size = (
+            recorded_task.get("input_size_bytes") if isinstance(recorded_task, dict) else None
         )
-    except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        if (
+            recorded_input_size is not None
+            and int(recorded_input_size) != task.input_path.stat().st_size
+        ):
+            return False
+        if expected_config is None:
+            return True
+        expected_fingerprint = config_fingerprint(expected_config)
+        recorded_fingerprint = payload.get("config_fingerprint")
+        if recorded_fingerprint is not None:
+            return recorded_fingerprint == expected_fingerprint
+        return legacy_config_matches(payload, expected_config)
+    except (FileNotFoundError, KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
 
 def select_worker_tasks(
-    discovered: list[NormalTask], args: argparse.Namespace
+    discovered: list[NormalTask],
+    args: argparse.Namespace,
+    expected_config: dict[str, Any] | None = None,
 ) -> tuple[list[NormalTask], int]:
-    pending = [task for task in discovered if args.overwrite or not task_is_complete(task)]
+    # Shard the stable discovered list before checking completion.  Otherwise two
+    # machines that start at different times can see different pending indexes and
+    # silently leave tasks unassigned.
+    assigned = [
+        task
+        for index, task in enumerate(discovered)
+        if index % args.num_shards == args.shard_index
+    ]
+    pending_count = sum(
+        args.overwrite or not task_is_complete(task, expected_config) for task in discovered
+    )
     worker_tasks = [
         task
-        for index, task in enumerate(pending)
-        if index % args.num_shards == args.shard_index
+        for task in assigned
+        if args.overwrite or not task_is_complete(task, expected_config)
     ]
     if args.limit is not None:
         worker_tasks = worker_tasks[: args.limit]
-    return worker_tasks, len(pending)
+    return worker_tasks, pending_count
 
 
 def probe_video(path: Path) -> VideoInfo:
@@ -806,9 +918,14 @@ class NormalCrafterRunner:
             unet = DiffusersUNetSpatioTemporalConditionModelNormalCrafter.from_pretrained(
                 args.unet_path,
                 subfolder="unet",
+                revision=args.unet_revision,
                 low_cpu_mem_usage=True,
             )
-            vae = AutoencoderKLTemporalDecoder.from_pretrained(args.unet_path, subfolder="vae")
+            vae = AutoencoderKLTemporalDecoder.from_pretrained(
+                args.unet_path,
+                subfolder="vae",
+                revision=args.unet_revision,
+            )
             vae.to(dtype=torch.float16)
             unet.to(dtype=torch.float16)
             self.pipe = NormalCrafterPipeline.from_pretrained(
@@ -817,6 +934,7 @@ class NormalCrafterRunner:
                 vae=vae,
                 torch_dtype=torch.float16,
                 variant="fp16",
+                revision=args.pretrain_revision,
             )
             self.pipe.set_progress_bar_config(disable=not self.verbose_inference)
             if args.cpu_offload == "none":
@@ -840,14 +958,19 @@ class NormalCrafterRunner:
                 restored.append(name)
         return restored
 
-    def reset_after_attempt(self) -> list[str]:
-        """Release cached task allocations and restore dtypes after success or failure."""
+    def reset_after_attempt(self, *, clear_cuda_cache: bool = False) -> list[str]:
+        """Release task allocations and clear CUDA cache only after abnormal attempts."""
         torch = self.torch
         gc.collect()
-        torch.cuda.empty_cache()
+        needs_dtype_restore = any(
+            getattr(self.pipe, name).dtype != self.inference_dtype for name in ("vae", "unet")
+        )
+        if clear_cuda_cache or needs_dtype_restore:
+            torch.cuda.empty_cache()
         restored = self.restore_model_dtypes()
-        gc.collect()
-        torch.cuda.empty_cache()
+        if restored:
+            gc.collect()
+            torch.cuda.empty_cache()
         return restored
 
     def load_video(self, task: NormalTask, args: argparse.Namespace) -> tuple[list[Any], float]:
@@ -961,8 +1084,8 @@ class NormalCrafterRunner:
         }
 
 
-def task_payload(task: NormalTask) -> dict[str, str]:
-    return {
+def task_payload(task: NormalTask) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "subset": task.subset_relative.as_posix(),
         "chunk": task.chunk,
         "input_camera": task.input_camera,
@@ -971,6 +1094,11 @@ def task_payload(task: NormalTask) -> dict[str, str]:
         "input_path": str(task.input_path),
         "output_path": str(task.output_path),
     }
+    try:
+        payload["input_size_bytes"] = task.input_path.stat().st_size
+    except OSError:
+        payload["input_size_bytes"] = None
+    return payload
 
 
 def process_task(
@@ -979,6 +1107,7 @@ def process_task(
     frames: list[Any],
     fps: float,
     args: argparse.Namespace,
+    expected_config: dict[str, Any],
     attempt: int,
 ) -> str:
     lock = OutputLock(
@@ -1001,7 +1130,7 @@ def process_task(
                 f"orphan_parts={removed_parts} ({removed_bytes} bytes)",
                 flush=True,
             )
-        if task_is_complete(task) and not args.overwrite:
+        if task_is_complete(task, expected_config) and not args.overwrite:
             print(f"SKIP: {task.output_path}", flush=True)
             return "skipped"
         input_info = probe_video(task.input_path)
@@ -1018,14 +1147,20 @@ def process_task(
         writer.finish()
         writer = None
         output_info = probe_video(task.output_path)
+        output_video = {
+            **vars(output_info),
+            "size_bytes": task.output_path.stat().st_size,
+        }
         payload: dict[str, Any] = {
             "status": "complete",
             "method": "NormalCrafter",
-            "normalcrafter_commit": "75af9887a2cb14cd1ce3883c5773bc296565777c",
+            "normalcrafter_commit": NORMALCRAFTER_COMMIT,
             "normal_convention": "native NormalCrafter view space; RGB=(normal+1)/2",
+            "annotation_config": expected_config,
+            "config_fingerprint": config_fingerprint(expected_config),
             "task": task_payload(task),
             "input_video": vars(input_info),
-            "output_video": vars(output_info),
+            "output_video": output_video,
             "settings": {
                 "target_fps": args.target_fps,
                 "process_length": args.process_length,
@@ -1111,8 +1246,9 @@ def main() -> None:
             ):
                 raise RuntimeError(f"{executable} is required but was not found in PATH")
 
+    expected_config = annotation_config(args)
     discovered = discover_tasks(args)
-    tasks, pending_count = select_worker_tasks(discovered, args)
+    tasks, pending_count = select_worker_tasks(discovered, args, expected_config)
     print_plan(tasks, args, len(discovered), pending_count)
     if args.dry_run:
         return
@@ -1148,38 +1284,48 @@ def main() -> None:
             result: str | None = None
             for attempt in range(1, args.max_attempts + 1):
                 frames: list[Any] | None = None
+                attempt_failed = False
+                retrying = False
                 try:
                     if attempt == 1:
                         frames, fps = current_future.result()
                     else:
                         frames, fps = runner.load_video(task, args)
-                    result = process_task(runner, task, frames, float(fps), args, attempt)
+                    result = process_task(
+                        runner,
+                        task,
+                        frames,
+                        float(fps),
+                        args,
+                        expected_config,
+                        attempt,
+                    )
                     final_error = None
                     break
                 except Exception as exc:
+                    attempt_failed = True
                     final_error = (type(exc).__name__, str(exc))
                     if attempt < args.max_attempts:
+                        retrying = True
                         print(
                             f"RETRY {attempt + 1}/{args.max_attempts}: "
                             f"{task.input_path}: {exc}",
                             file=sys.stderr,
                             flush=True,
                         )
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                    if attempt < args.max_attempts and args.retry_delay_seconds:
-                        time.sleep(args.retry_delay_seconds)
                     if attempt == args.max_attempts and not args.continue_on_error:
                         raise
                 finally:
                     if frames is not None:
                         del frames
-                    restored = runner.reset_after_attempt()
+                    restored = runner.reset_after_attempt(clear_cuda_cache=attempt_failed)
                     if restored:
                         print(
                             f"RECOVERED model dtype after attempt: {','.join(restored)}",
                             flush=True,
                         )
+                if retrying and args.retry_delay_seconds:
+                    time.sleep(args.retry_delay_seconds)
 
             if final_error is not None:
                 failed += 1
@@ -1197,12 +1343,23 @@ def main() -> None:
             else:
                 skipped += 1
 
+    remaining = [task for task in tasks if not task_is_complete(task, expected_config)]
     print(
         "NormalCrafter complete: "
-        f"{succeeded} succeeded, {skipped} skipped, {locked} locked, {failed} failed",
+        f"{succeeded} succeeded, {skipped} skipped, {locked} locked, {failed} failed, "
+        f"{len(remaining)} still pending",
         flush=True,
     )
-    if failed:
+    if remaining:
+        for task in remaining[: args.print_limit]:
+            print(f"PENDING: {task.output_path}", file=sys.stderr, flush=True)
+        if len(remaining) > args.print_limit:
+            print(
+                f"... and {len(remaining) - args.print_limit} more pending output(s)",
+                file=sys.stderr,
+                flush=True,
+            )
+    if failed or remaining:
         raise SystemExit(1)
 
 

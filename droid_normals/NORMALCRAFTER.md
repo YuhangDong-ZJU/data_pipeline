@@ -45,28 +45,32 @@ alternative. If only the executable path is known, set
 `DATA_PIPELINE_CONDA_BIN=/absolute/path/to/bin/conda` for every toolkit, or
 `DROID_NORMALS_CONDA_BIN` for this pipeline only.
 
-`download` uses Hugging Face's resumable snapshot downloader and materializes
-only `real_world/droid/meta/**` and the selected DROID chunk/camera MP4s. The repository ID is explicit
-because the private/filtered 18K RGB dataset cannot be inferred from its local
-directory name.
+`download` reuses `dataset_download/download_recam_lerobot.sh` and materializes
+only `real_world/droid/meta/**` and the selected DROID chunk/camera MP4s. It
+defaults to `Sponbebob4258/recam-lerobot`; an alternative repository ID remains
+accepted as the optional final argument.
 
 `check` creates the `droid_normals` conda environment, checks out the pinned
 NormalCrafter revision, applies `normalcrafter_long_video.patch`, installs its
-pinned requirements, downloads both model repositories into the shared
+pinned requirements, downloads both model repositories at pinned revisions into the shared
 `Res/runtime/normalcrafter/hf_cache`, and loads the model on one GPU.
 
 `convert` starts one background process per selected physical GPU. Each process
-loads one persistent model and owns a deterministic shard. On the first run, a
+loads one persistent model and owns a stable shard of the full discovered task
+list. Completed outputs are filtered only after sharding, so machines that start
+at different times keep the same ownership. On the first run, a
 single-GPU preflight populates and validates the shared checkpoint cache before
 the workers start, avoiding concurrent first-download races. A restart first
 filters outputs having both an atomically published MP4 and an atomically
 published `status=complete` JSON, then redistributes only unfinished videos over
 the available workers. Each video is attempted three times by default; if a
 worker process still exits nonzero, the launcher performs a second resumable
-worker pass. Logs are written per pass and GPU below
+worker pass. A worker returns nonzero when locked or failed outputs remain after
+its pass, rather than reporting a partial run as complete. Logs are written per pass and GPU below
 `Res/experiments/<exp_name>/logs`.
-Each attempt restores the model's FP16 invariant and releases unused CUDA cache
-before the next video. The launcher defaults to
+Each attempt restores the model's FP16 invariant. CUDA cache is released after
+failed attempts or dtype recovery, while successful attempts reuse allocator
+blocks for better throughput. The launcher defaults to
 `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128` to limit long-run allocator
 fragmentation. A CUDA OOM therefore remains local to one attempt instead of
 leaving the persistent VAE in FP32 and poisoning all later tasks.
@@ -92,6 +96,11 @@ The output is written beside RGB as
 1280x720 H.264, CRF 17, `yuv420p`, and 15 FPS. Model inference uses a 1024x576
 working resolution by default because direct 1280x720 inference exceeded 24 GB
 in the tested implementation.
+
+Each completed JSON records a configuration fingerprint, pinned model revisions,
+input/output file sizes and video properties. Resume accepts compatible legacy
+JSON files, while new outputs are skipped only when their fingerprint and MP4
+header/size checks match the current run.
 
 For several machines sharing or synchronizing one output tree, assign disjoint
 global shards. For four machines with eight GPUs each, use the same conversion

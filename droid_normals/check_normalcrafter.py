@@ -14,11 +14,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--normalcrafter-root", type=Path, required=True)
-    parser.add_argument("--unet-path", default="Yanrui95/NormalCrafter")
-    parser.add_argument(
-        "--pretrain-path",
-        default="stabilityai/stable-video-diffusion-img2vid-xt",
-    )
+    parser.add_argument("--unet-path")
+    parser.add_argument("--unet-revision")
+    parser.add_argument("--pretrain-path")
+    parser.add_argument("--pretrain-revision")
     parser.add_argument("--cpu-offload", choices=["none", "model", "sequential"], default="none")
     parser.add_argument("--verbose-inference", action="store_true")
     args = parser.parse_args()
@@ -37,8 +36,10 @@ def main() -> None:
     runner = module.NormalCrafterRunner(
         SimpleNamespace(
             normalcrafter_root=args.normalcrafter_root,
-            unet_path=args.unet_path,
-            pretrain_path=args.pretrain_path,
+            unet_path=args.unet_path or module.DEFAULT_UNET_PATH,
+            unet_revision=args.unet_revision or module.DEFAULT_UNET_REVISION,
+            pretrain_path=args.pretrain_path or module.DEFAULT_PRETRAIN_PATH,
+            pretrain_revision=args.pretrain_revision or module.DEFAULT_PRETRAIN_REVISION,
             cpu_offload=args.cpu_offload,
             verbose_inference=args.verbose_inference,
         )

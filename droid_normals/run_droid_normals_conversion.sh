@@ -27,6 +27,12 @@ NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$RUNTIME_DIR/NormalCrafter}"
 HF_HOME="$RUNTIME_DIR/hf_cache"
 LOG_DIR="$RUN_DIR/logs"
 MODEL_READY_MARKER="$RUNTIME_DIR/.normalcrafter-model-ready"
+NORMALCRAFTER_COMMIT="75af9887a2cb14cd1ce3883c5773bc296565777c"
+UNET_PATH="${DROID_NORMALS_UNET_PATH:-Yanrui95/NormalCrafter}"
+UNET_REVISION="${DROID_NORMALS_UNET_REVISION:-7e24d68d86ae008fe08ef50b4e51cd2fc2c8cf57}"
+PRETRAIN_PATH="${DROID_NORMALS_PRETRAIN_PATH:-stabilityai/stable-video-diffusion-img2vid-xt}"
+PRETRAIN_REVISION="${DROID_NORMALS_PRETRAIN_REVISION:-9e43909513c6714f1bc78bcb44d96e733cd242aa}"
+MODEL_READY_VALUE="$NORMALCRAFTER_COMMIT $UNET_PATH@$UNET_REVISION $PRETRAIN_PATH@$PRETRAIN_REVISION"
 
 if [[ ! "$MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: max_attempts must be a positive integer: $MAX_ATTEMPTS" >&2
@@ -177,9 +183,13 @@ check_model() {
   CUDA_VISIBLE_DEVICES="$CHECK_GPU" "$PYTHON" "$SCRIPT_DIR/check_normalcrafter.py" \
     --worker "$WORKER" \
     --normalcrafter-root "$NORMALCRAFTER_ROOT" \
+    --unet-path "$UNET_PATH" \
+    --unet-revision "$UNET_REVISION" \
+    --pretrain-path "$PRETRAIN_PATH" \
+    --pretrain-revision "$PRETRAIN_REVISION" \
     --cpu-offload "${DROID_NORMALS_CPU_OFFLOAD:-none}" \
     "${VERBOSE_ARGS[@]}"
-  printf '%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$MODEL_READY_MARKER"
+  printf '%s\n' "$MODEL_READY_VALUE" > "$MODEL_READY_MARKER"
 }
 
 if [[ "$CHECK_ONLY" == "1" ]]; then
@@ -193,7 +203,8 @@ if [[ ! -d "$DATASET_DIR" ]]; then
   echo "ERROR: dataset directory does not exist: $DATASET_DIR" >&2
   exit 1
 fi
-if [[ "$DRY_RUN" != "1" && ! -f "$MODEL_READY_MARKER" ]]; then
+if [[ "$DRY_RUN" != "1" \
+    && "$(cat "$MODEL_READY_MARKER" 2>/dev/null || true)" != "$MODEL_READY_VALUE" ]]; then
   echo "No completed model preflight was found; populating the checkpoint cache once."
   check_model
 fi
@@ -254,6 +265,10 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
     LOG_FILE="$LOG_DIR/${RUN_TAG}-pass${PASS}-gpu${GPU_ID}-shard${SHARD_INDEX}.log"
     CUDA_VISIBLE_DEVICES="$GPU_ID" setsid "$PYTHON" "$WORKER" "$DATASET_DIR" \
         --normalcrafter-root "$NORMALCRAFTER_ROOT" \
+        --unet-path "$UNET_PATH" \
+        --unet-revision "$UNET_REVISION" \
+        --pretrain-path "$PRETRAIN_PATH" \
+        --pretrain-revision "$PRETRAIN_REVISION" \
         --chunks "$CHUNKS" \
         --cameras "${CAMERA_ARRAY[@]}" \
         "${SUBSET_ARGS[@]}" \

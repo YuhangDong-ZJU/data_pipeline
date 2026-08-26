@@ -118,13 +118,36 @@ check_name "$DATASET_NAME"
 case "${1:-}" in
   download)
     [[ $# -ge 2 && $# -le 3 ]] || { usage; exit 2; }
-    REPO_ID="${3:-${DROID_NORMALS_REPO_ID:-}}"
-    if [[ -z "$REPO_ID" ]]; then
-      echo "ERROR: pass repo_id or set DROID_NORMALS_REPO_ID." >&2
+    REPO_ID="${3:-${DROID_NORMALS_REPO_ID:-Sponbebob4258/recam-lerobot}}"
+    DATASET_PREFIX="${DROID_NORMALS_DATASET_PREFIX-real_world/droid}"
+    [[ -n "$DATASET_PREFIX" ]] || {
+      echo "ERROR: DROID_NORMALS_DATASET_PREFIX cannot be empty for dataset download." >&2
       exit 2
-    fi
-    exec bash "$SCRIPT_DIR/download_droid_rgb_inputs.sh" \
-      "$2" "$DATASET_DIR" "$REPO_ID" "$CAMERAS"
+    }
+    IFS=',' read -r -a DOWNLOAD_CAMERA_ARRAY <<<"$CAMERAS"
+    DOWNLOAD_MODALITIES="meta"
+    for CAMERA in "${DOWNLOAD_CAMERA_ARRAY[@]}"; do
+      case "$CAMERA" in
+        observation.images.rgb_*) MODALITY="$CAMERA" ;;
+        rgb_*) MODALITY="$CAMERA" ;;
+        *[!0-9]*|'')
+          echo "ERROR: invalid RGB camera for download: $CAMERA" >&2
+          exit 2
+          ;;
+        *) MODALITY="rgb_$(printf '%02d' "$((10#$CAMERA))")" ;;
+      esac
+      DOWNLOAD_MODALITIES+=",$MODALITY"
+    done
+    DOWNLOAD_MINIFORGE_HOME="${MINIFORGE_HOME:-$(
+      cd -- "$(dirname -- "$CONDA_BIN")/.." && pwd -P
+    )}"
+    exec bash "$PROJECT_ROOT/dataset_download/download_recam_lerobot.sh" \
+      --miniforge-home "$DOWNLOAD_MINIFORGE_HOME" \
+      "$DATASET_PREFIX" \
+      --repo-id "$REPO_ID" \
+      --destination "$DATASET_DIR" \
+      --modalities "$DOWNLOAD_MODALITIES" \
+      --chunks "$2"
     ;;
 
   install)
