@@ -13,31 +13,31 @@ if [[ $# -lt 2 ]]; then
   exit 2
 fi
 
-if [[ -n "${MINIFORGE_HOME:-}" ]]; then
-  export PATH="$MINIFORGE_HOME/bin:$PATH"
+CONDA_BIN="${DROID_DEPTH_CONDA_BIN:-${DATA_PIPELINE_CONDA_BIN:-}}"
+if [[ -z "$CONDA_BIN" && -n "${MINIFORGE_HOME:-}" ]]; then
+  CONDA_BIN="$MINIFORGE_HOME/bin/conda"
 fi
-
-if ! command -v conda >/dev/null 2>&1; then
+if [[ -z "$CONDA_BIN" ]]; then
+  CONDA_BIN="$(command -v conda || true)"
+fi
+if [[ -z "$CONDA_BIN" ]]; then
   for candidate in "$HOME/miniforge3/bin" "$HOME/miniconda3/bin"; do
     if [[ -x "$candidate/conda" ]]; then
-      export PATH="$candidate:$PATH"
+      CONDA_BIN="$candidate/conda"
       break
     fi
   done
 fi
-
-if ! command -v conda >/dev/null 2>&1; then
+if [[ -z "$CONDA_BIN" || ! -x "$CONDA_BIN" ]]; then
   echo "ERROR: Conda or Miniforge was not found."
-  echo "If Miniforge is installed elsewhere, run:"
-  echo "  export MINIFORGE_HOME=/path/to/miniforge"
+  echo "Set MINIFORGE_HOME, DATA_PIPELINE_CONDA_BIN or DROID_DEPTH_CONDA_BIN."
   exit 1
 fi
+export PATH="$(dirname -- "$CONDA_BIN"):$PATH"
 
-eval "$(conda shell.bash hook)"
-
-if ! conda env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
+if ! "$CONDA_BIN" env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
   echo "Creating Conda environment: $ENV_NAME"
-  conda create \
+  "$CONDA_BIN" create \
     --name "$ENV_NAME" \
     --channel conda-forge \
     --override-channels \
@@ -45,5 +45,5 @@ if ! conda env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
     --yes
 fi
 
-exec conda run --no-capture-output --name "$ENV_NAME" \
+exec "$CONDA_BIN" run --no-capture-output --name "$ENV_NAME" \
   python "$ROOT/trim_padded_tails.py" "$@"

@@ -15,24 +15,32 @@ NORMALCRAFTER_ROOT="$WORK_DIR/NormalCrafter"
 NORMALCRAFTER_COMMIT="75af9887a2cb14cd1ce3883c5773bc296565777c"
 PATCH="$SCRIPT_DIR/normalcrafter_long_video.patch"
 
-if [[ -n "${MINIFORGE_HOME:-}" ]]; then
-  export PATH="$MINIFORGE_HOME/bin:$PATH"
+CONDA_BIN="${DROID_NORMALS_CONDA_BIN:-${DATA_PIPELINE_CONDA_BIN:-}}"
+if [[ -z "$CONDA_BIN" && -n "${MINIFORGE_HOME:-}" ]]; then
+  CONDA_BIN="$MINIFORGE_HOME/bin/conda"
 fi
-if ! command -v conda >/dev/null 2>&1; then
-  echo "ERROR: conda was not found. Set MINIFORGE_HOME=/path/to/miniforge." >&2
+if [[ -z "$CONDA_BIN" ]]; then
+  CONDA_BIN="$(command -v conda || true)"
+fi
+if [[ -z "$CONDA_BIN" || ! -x "$CONDA_BIN" ]]; then
+  echo "ERROR: conda is unavailable. Set MINIFORGE_HOME or DROID_NORMALS_CONDA_BIN." >&2
   exit 1
 fi
-eval "$(conda shell.bash hook)"
+export DROID_NORMALS_CONDA_BIN="$CONDA_BIN"
+export PATH="$(dirname -- "$CONDA_BIN"):$PATH"
 mkdir -p "$WORK_DIR"
 
-if ! conda env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
-  conda create -n "$ENV_NAME" --override-channels -c conda-forge \
+if ! "$CONDA_BIN" env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
+  "$CONDA_BIN" create -n "$ENV_NAME" --override-channels -c conda-forge \
     python=3.10 pip ffmpeg git -y
 fi
-CONDA_PREFIX="$(conda run -n "$ENV_NAME" python -c 'import sys; print(sys.prefix)')"
+CONDA_PREFIX="$(
+  "$CONDA_BIN" run -n "$ENV_NAME" python -c 'import sys; print(sys.prefix)' \
+    | tail -n 1
+)"
 export PATH="$CONDA_PREFIX/bin:$PATH"
 if [[ ! -x "$CONDA_PREFIX/bin/ffmpeg" || ! -x "$CONDA_PREFIX/bin/ffprobe" ]]; then
-  conda install -n "$ENV_NAME" --override-channels -c conda-forge ffmpeg -y
+  "$CONDA_BIN" install -n "$ENV_NAME" --override-channels -c conda-forge ffmpeg -y
 fi
 for executable in git sha256sum; do
   if ! command -v "$executable" >/dev/null 2>&1; then
@@ -73,16 +81,16 @@ REQUIREMENTS_HASH="$(sha256sum "$REQUIREMENTS" | awk '{print $1}')"
 READY_MARKER="$WORK_DIR/.normalcrafter-environment-ready"
 INSTALLED_HASH="$(cat "$READY_MARKER" 2>/dev/null || true)"
 if [[ "$INSTALLED_HASH" != "$REQUIREMENTS_HASH" ]] \
-    || ! conda run -n "$ENV_NAME" python -c \
+    || ! "$CONDA_BIN" run -n "$ENV_NAME" python -c \
       'import torch, diffusers, transformers, accelerate, xformers, decord, cv2, hf_xet' \
       >/dev/null 2>&1; then
-  conda run -n "$ENV_NAME" python -m pip install --upgrade pip setuptools wheel
-  conda run -n "$ENV_NAME" python -m pip install -r "$REQUIREMENTS"
-  conda run -n "$ENV_NAME" python -m pip install --upgrade hf_xet
+  "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install --upgrade pip setuptools wheel
+  "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install -r "$REQUIREMENTS"
+  "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install --upgrade hf_xet
   printf '%s\n' "$REQUIREMENTS_HASH" > "$READY_MARKER"
 fi
 
-mkdir -p "$WORK_DIR/hf_cache" "$WORK_DIR/logs"
+mkdir -p "$WORK_DIR/hf_cache"
 echo "NormalCrafter environment ready."
 echo "  Conda environment: $ENV_NAME ($CONDA_PREFIX)"
 echo "  Source:            $NORMALCRAFTER_ROOT"

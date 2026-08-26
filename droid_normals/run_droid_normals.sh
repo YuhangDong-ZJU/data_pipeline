@@ -7,12 +7,14 @@ DATASET_NAME="${DROID_NORMALS_DATASET_NAME:-recam_lerobot}"
 DATASET_DIR="$PROJECT_ROOT/DATA/$DATASET_NAME"
 CAMERAS="${DROID_NORMALS_CAMERAS:-01,02}"
 MAX_ATTEMPTS="${DROID_NORMALS_MAX_ATTEMPTS:-3}"
+RUNTIME_DIR="${DROID_NORMALS_RUNTIME_DIR:-$PROJECT_ROOT/Res/runtime/normalcrafter}"
+EXPERIMENTS_DIR="$PROJECT_ROOT/Res/experiments"
 
 usage() {
   echo "Usage:"
   echo "  bash $0 [--miniforge-home PATH] download <chunks> [repo_id]"
-  echo "  bash $0 [--miniforge-home PATH] install <exp_name>"
-  echo "  bash $0 [--miniforge-home PATH] check <exp_name> [gpu_id]"
+  echo "  bash $0 [--miniforge-home PATH] install"
+  echo "  bash $0 [--miniforge-home PATH] check [gpu_id]"
   echo "  bash $0 [--miniforge-home PATH] convert <chunks> <exp_name> [gpu_ids]"
   echo
   echo "Default dataset: ./DATA/$DATASET_NAME (override with DROID_NORMALS_DATASET_NAME)."
@@ -28,33 +30,67 @@ check_name() {
 
 runtime_ready() {
   local runtime_dir="$1"
+  local expected_commit="75af9887a2cb14cd1ce3883c5773bc296565777c"
+  local actual_commit
+  actual_commit="$(git -C "$runtime_dir/NormalCrafter" rev-parse HEAD 2>/dev/null || true)"
   [[ -d "$runtime_dir/NormalCrafter/.git" \
+    && "$actual_commit" == "$expected_commit" \
     && -s "$runtime_dir/.normalcrafter-environment-ready" \
     && -s "$runtime_dir/.normalcrafter-model-ready" \
     && -d "$runtime_dir/hf_cache/hub/models--Yanrui95--NormalCrafter" \
     && -d "$runtime_dir/hf_cache/hub/models--stabilityai--stable-video-diffusion-img2vid-xt" ]]
 }
 
-seed_runtime_from_check() {
-  local target_dir="$1"
-  local source_dir="${DROID_NORMALS_RUNTIME_SOURCE:-$PROJECT_ROOT/Res/h100_1}"
-  if [[ "$source_dir" == "$target_dir" ]] || runtime_ready "$target_dir"; then
+link_runtime() {
+  local source_dir="$1"
+  local target_dir="$2"
+  local link_target
+  mkdir -p "$(dirname -- "$target_dir")"
+  link_target="$(realpath --relative-to="$(dirname -- "$target_dir")" "$source_dir")"
+  ln -s "$link_target" "$target_dir"
+  echo "Reused checked runtime: $target_dir -> $link_target"
+}
+
+prepare_shared_runtime() {
+  local source_dir="${DROID_NORMALS_RUNTIME_SOURCE:-}"
+  local candidate
+  local -a candidates=()
+
+  if runtime_ready "$RUNTIME_DIR"; then
     return 0
   fi
-  if ! runtime_ready "$source_dir"; then
-    echo "No complete checked runtime at $source_dir; preparing $target_dir normally."
+  if [[ -e "$RUNTIME_DIR" || -L "$RUNTIME_DIR" ]]; then
+    echo "Shared runtime exists but is incomplete: $RUNTIME_DIR" >&2
     return 0
   fi
 
-  mkdir -p "$target_dir"
-  echo "Copying checked runtime: $source_dir -> $target_dir"
-  rm -f "$target_dir/.normalcrafter-environment-ready" \
-    "$target_dir/.normalcrafter-model-ready"
-  cp -a --reflink=auto "$source_dir/NormalCrafter" "$target_dir/"
-  cp -a --reflink=auto "$source_dir/hf_cache" "$target_dir/"
-  cp -a "$source_dir/.normalcrafter-environment-ready" "$target_dir/"
-  cp -a "$source_dir/.normalcrafter-model-ready" "$target_dir/"
-  echo "Checked runtime copied."
+  if [[ -n "$source_dir" ]]; then
+    if ! runtime_ready "$source_dir"; then
+      echo "ERROR: DROID_NORMALS_RUNTIME_SOURCE is incomplete: $source_dir" >&2
+      exit 1
+    fi
+    link_runtime "$source_dir" "$RUNTIME_DIR"
+    return 0
+  fi
+
+  shopt -s nullglob
+  for candidate in "$PROJECT_ROOT"/Res/*; do
+    [[ "$candidate" == "$PROJECT_ROOT/Res/runtime" \
+      || "$candidate" == "$PROJECT_ROOT/Res/experiments" ]] && continue
+    if runtime_ready "$candidate"; then
+      candidates+=("$candidate")
+    fi
+  done
+  shopt -u nullglob
+
+  if [[ ${#candidates[@]} -eq 1 ]]; then
+    link_runtime "${candidates[0]}" "$RUNTIME_DIR"
+  elif [[ ${#candidates[@]} -gt 1 ]]; then
+    echo "ERROR: multiple checked legacy runtimes were found:" >&2
+    printf '  %s\n' "${candidates[@]}" >&2
+    echo "Set DROID_NORMALS_RUNTIME_SOURCE to the one that should be reused." >&2
+    exit 1
+  fi
 }
 
 if [[ "${1:-}" == "--miniforge-home" ]]; then
@@ -62,15 +98,21 @@ if [[ "${1:-}" == "--miniforge-home" ]]; then
   export MINIFORGE_HOME="$2"
   shift 2
 fi
-if [[ -z "${MINIFORGE_HOME:-}" ]]; then
-  echo "ERROR: pass --miniforge-home /xxxx/miniforge/xxxx or set MINIFORGE_HOME." >&2
-  exit 2
+
+CONDA_BIN="${DROID_NORMALS_CONDA_BIN:-${DATA_PIPELINE_CONDA_BIN:-}}"
+if [[ -z "$CONDA_BIN" && -n "${MINIFORGE_HOME:-}" ]]; then
+  CONDA_BIN="$MINIFORGE_HOME/bin/conda"
 fi
-if [[ ! -x "$MINIFORGE_HOME/bin/conda" ]]; then
-  echo "ERROR: conda does not exist at $MINIFORGE_HOME/bin/conda" >&2
+if [[ -z "$CONDA_BIN" ]]; then
+  CONDA_BIN="$(command -v conda || true)"
+fi
+if [[ -z "$CONDA_BIN" || ! -x "$CONDA_BIN" ]]; then
+  echo "ERROR: conda is unavailable. Use --miniforge-home, MINIFORGE_HOME," >&2
+  echo "       DATA_PIPELINE_CONDA_BIN or DROID_NORMALS_CONDA_BIN." >&2
   exit 1
 fi
-export PATH="$MINIFORGE_HOME/bin:$PATH"
+export DROID_NORMALS_CONDA_BIN="$CONDA_BIN"
+export PATH="$(dirname -- "$CONDA_BIN"):$PATH"
 check_name "$DATASET_NAME"
 
 case "${1:-}" in
@@ -86,26 +128,27 @@ case "${1:-}" in
     ;;
 
   install)
-    [[ $# -eq 2 ]] || { usage; exit 2; }
-    check_name "$2"
-    exec bash "$SCRIPT_DIR/install_normalcrafter.sh" "$PROJECT_ROOT/Res/$2"
+    [[ $# -eq 1 ]] || { usage; exit 2; }
+    prepare_shared_runtime
+    exec bash "$SCRIPT_DIR/install_normalcrafter.sh" "$RUNTIME_DIR"
     ;;
 
   check)
-    [[ $# -ge 2 && $# -le 3 ]] || { usage; exit 2; }
-    check_name "$2"
+    [[ $# -ge 1 && $# -le 2 ]] || { usage; exit 2; }
+    prepare_shared_runtime
     export DROID_NORMALS_CHECK_ONLY=1
     exec bash "$SCRIPT_DIR/run_droid_normals_conversion.sh" \
-      "0" "$PROJECT_ROOT/DATA/.check" "${3:-0}" "$PROJECT_ROOT/Res/$2" "01" "1"
+      "0" "$PROJECT_ROOT/DATA/.check" "${2:-0}" "$RUNTIME_DIR" \
+      "$EXPERIMENTS_DIR/.check" "01" "1"
     ;;
 
   convert)
     [[ $# -ge 3 && $# -le 4 ]] || { usage; exit 2; }
     check_name "$3"
-    WORK_DIR="$PROJECT_ROOT/Res/$3"
-    seed_runtime_from_check "$WORK_DIR"
+    prepare_shared_runtime
+    RUN_DIR="$EXPERIMENTS_DIR/$3"
     exec bash "$SCRIPT_DIR/run_droid_normals_conversion.sh" \
-      "$2" "$DATASET_DIR" "${4:-all}" "$WORK_DIR" \
+      "$2" "$DATASET_DIR" "${4:-all}" "$RUNTIME_DIR" "$RUN_DIR" \
       "$CAMERAS" "$MAX_ATTEMPTS"
     ;;
 

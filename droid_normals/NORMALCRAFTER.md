@@ -13,30 +13,37 @@ are relative to the resolved ReCam project root:
 
 ```text
 DATA/<dataset_name>
-Res/<exp_name>/NormalCrafter
-Res/<exp_name>/hf_cache
-Res/<exp_name>/logs
+Res/runtime/normalcrafter/NormalCrafter
+Res/runtime/normalcrafter/hf_cache
+Res/experiments/<exp_name>/logs
 ```
 
 The production default is `DATA/recam_lerobot/real_world/droid`. The launcher
 passes `real_world/droid` as the only selected subset, so other real-world or
 simulation datasets below `recam_lerobot` are not annotated accidentally.
 
-Pass the Miniforge root explicitly. It must be the directory containing
-`bin/conda`, for example `/xxxxxx/miniforge/xxxx/`:
+The launcher accepts cluster-specific Miniforge locations without embedding
+them in the repository. It checks, in order, `DROID_NORMALS_CONDA_BIN`,
+`DATA_PIPELINE_CONDA_BIN`, `MINIFORGE_HOME/bin/conda`, and finally `conda` from
+`PATH`. For a Miniforge installation at `/xxxxxx/miniforge/xxxx`, use:
 
 ```bash
-MF=/xxxxxx/miniforge/xxxx
+export MINIFORGE_HOME=/xxxxxx/miniforge/xxxx
 
-bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
+bash droid_normals/run_droid_normals.sh \
   download 0-3 owner/recam_lerobot
 
-bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
-  check normalcrafter_v1 0
+bash droid_normals/run_droid_normals.sh \
+  check 0
 
-bash droid_normals/run_droid_normals.sh --miniforge-home "$MF" \
+bash droid_normals/run_droid_normals.sh \
   convert 0-3 normalcrafter_v1 all
 ```
+
+`--miniforge-home /xxxxxx/miniforge/xxxx` remains available as a per-command
+alternative. If only the executable path is known, set
+`DATA_PIPELINE_CONDA_BIN=/absolute/path/to/bin/conda` for every toolkit, or
+`DROID_NORMALS_CONDA_BIN` for this pipeline only.
 
 `download` uses Hugging Face's resumable snapshot downloader and materializes
 only `real_world/droid/meta/**` and the selected DROID chunk/camera MP4s. The repository ID is explicit
@@ -45,8 +52,8 @@ directory name.
 
 `check` creates the `droid_normals` conda environment, checks out the pinned
 NormalCrafter revision, applies `normalcrafter_long_video.patch`, installs its
-pinned requirements, downloads both model repositories into the experiment's
-`hf_cache`, and loads the model on one GPU.
+pinned requirements, downloads both model repositories into the shared
+`Res/runtime/normalcrafter/hf_cache`, and loads the model on one GPU.
 
 `convert` starts one background process per selected physical GPU. Each process
 loads one persistent model and owns a deterministic shard. On the first run, a
@@ -56,20 +63,21 @@ filters outputs having both an atomically published MP4 and an atomically
 published `status=complete` JSON, then redistributes only unfinished videos over
 the available workers. Each video is attempted three times by default; if a
 worker process still exits nonzero, the launcher performs a second resumable
-worker pass. Logs are written per pass and GPU below `Res/<exp_name>/logs`.
+worker pass. Logs are written per pass and GPU below
+`Res/experiments/<exp_name>/logs`.
 Each attempt restores the model's FP16 invariant and releases unused CUDA cache
 before the next video. The launcher defaults to
 `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128` to limit long-run allocator
 fragmentation. A CUDA OOM therefore remains local to one attempt instead of
 leaving the persistent VAE in FP32 and poisoning all later tasks.
 
-Before conversion, a new experiment directory reuses the checked runtime from
-`Res/h100_1` when that directory contains the pinned NormalCrafter checkout,
-both readiness markers, and both Hugging Face model caches. This is a fixed,
-validated source rather than a filesystem-wide search. Set
-`DROID_NORMALS_RUNTIME_SOURCE=/path/to/ready/runtime` to use another checked
-runtime. If the source is absent or incomplete, conversion prepares the target
-runtime normally.
+All experiments use the single shared runtime at `Res/runtime/normalcrafter`;
+experiment directories contain logs only. For compatibility with an existing
+checkout, the launcher performs a one-time controlled migration when the
+standard runtime is absent. If exactly one complete legacy `Res/<name>` runtime
+exists, it creates a relative symbolic link instead of copying its model files.
+If several valid legacy runtimes exist, it stops and lists them; set
+`DROID_NORMALS_RUNTIME_SOURCE=/path/to/ready/runtime` to select one explicitly.
 
 Output locks contain a host, PID, Linux boot/process identity and unique owner
 token. A dead owner on the same host is reclaimed immediately. For shared
@@ -108,7 +116,7 @@ standalone DROID dataset has `videos/` directly at its root.
 The high-level command intentionally mirrors `droid-metric-depth`:
 
 ```text
-check <exp_name> [gpu_id]
+check [gpu_id]
 convert <chunks> <exp_name> [gpu_ids]
 ```
 

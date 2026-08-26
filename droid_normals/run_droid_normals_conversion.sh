@@ -2,30 +2,31 @@
 set -Eeuo pipefail
 export PYTHONNOUSERSITE=1
 
-if [[ $# -lt 4 || $# -gt 6 ]]; then
-  echo "Usage: bash $0 <chunks> <dataset_dir> <gpu_ids> <work_dir> [cameras] [max_attempts]"
-  echo "Example: bash $0 0-3 ./DATA/droid all ./Res/nc-v1 01,02 3"
+if [[ $# -lt 5 || $# -gt 7 ]]; then
+  echo "Usage: bash $0 <chunks> <dataset_dir> <gpu_ids> <runtime_dir> <run_dir> [cameras] [max_attempts]"
+  echo "Example: bash $0 0-3 ./DATA/droid all ./Res/runtime/normalcrafter ./Res/experiments/nc-v1 01,02 3"
   exit 2
 fi
 
 CHUNKS="$1"
 DATASET_DIR="$2"
 GPU_IDS="$3"
-WORK_DIR="$4"
-CAMERAS="${5:-01,02}"
+RUNTIME_DIR="$4"
+RUN_DIR="$5"
+CAMERAS="${6:-01,02}"
 SUBSETS="${DROID_NORMALS_SUBSETS-real_world/droid}"
 EPISODES="${DROID_NORMALS_EPISODES:-}"
-MAX_ATTEMPTS="${6:-3}"
+MAX_ATTEMPTS="${7:-3}"
 CHECK_ONLY="${DROID_NORMALS_CHECK_ONLY:-0}"
 DRY_RUN="${DROID_NORMALS_DRY_RUN:-0}"
 VERBOSE_INFERENCE="${DROID_NORMALS_VERBOSE_INFERENCE:-0}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 WORKER="$SCRIPT_DIR/annotate_normals_normalcrafter.py"
-NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$WORK_DIR/NormalCrafter}"
-HF_HOME="$WORK_DIR/hf_cache"
-LOG_DIR="$WORK_DIR/logs"
-MODEL_READY_MARKER="$WORK_DIR/.normalcrafter-model-ready"
+NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$RUNTIME_DIR/NormalCrafter}"
+HF_HOME="$RUNTIME_DIR/hf_cache"
+LOG_DIR="$RUN_DIR/logs"
+MODEL_READY_MARKER="$RUNTIME_DIR/.normalcrafter-model-ready"
 
 if [[ ! "$MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: max_attempts must be a positive integer: $MAX_ATTEMPTS" >&2
@@ -37,9 +38,6 @@ if [[ "$CHECK_ONLY" != "0" && "$CHECK_ONLY" != "1" \
   echo "ERROR: check-only, dry-run and verbose-inference settings must be 0 or 1." >&2
   exit 2
 fi
-if [[ -n "${MINIFORGE_HOME:-}" ]]; then
-  export PATH="$MINIFORGE_HOME/bin:$PATH"
-fi
 if ! command -v nvidia-smi >/dev/null 2>&1; then
   echo "ERROR: nvidia-smi is unavailable." >&2
   exit 1
@@ -50,13 +48,24 @@ if [[ ! -f "$WORKER" ]]; then
 fi
 
 if [[ "${DROID_NORMALS_SKIP_INSTALL:-0}" != "1" ]]; then
-  if ! command -v conda >/dev/null 2>&1; then
-    echo "ERROR: conda was not found. Set MINIFORGE_HOME=/path/to/miniforge." >&2
+  CONDA_BIN="${DROID_NORMALS_CONDA_BIN:-${DATA_PIPELINE_CONDA_BIN:-}}"
+  if [[ -z "$CONDA_BIN" && -n "${MINIFORGE_HOME:-}" ]]; then
+    CONDA_BIN="$MINIFORGE_HOME/bin/conda"
+  fi
+  if [[ -z "$CONDA_BIN" ]]; then
+    CONDA_BIN="$(command -v conda || true)"
+  fi
+  if [[ -z "$CONDA_BIN" || ! -x "$CONDA_BIN" ]]; then
+    echo "ERROR: conda is unavailable. Set MINIFORGE_HOME or DROID_NORMALS_CONDA_BIN." >&2
     exit 1
   fi
-  bash "$SCRIPT_DIR/install_normalcrafter.sh" "$WORK_DIR"
-  eval "$(conda shell.bash hook)"
-  CONDA_PREFIX="$(conda run -n "$ENV_NAME" python -c 'import sys; print(sys.prefix)')"
+  export DROID_NORMALS_CONDA_BIN="$CONDA_BIN"
+  export PATH="$(dirname -- "$CONDA_BIN"):$PATH"
+  bash "$SCRIPT_DIR/install_normalcrafter.sh" "$RUNTIME_DIR"
+  CONDA_PREFIX="$(
+    "$CONDA_BIN" run -n "$ENV_NAME" python -c 'import sys; print(sys.prefix)' \
+      | tail -n 1
+  )"
   PYTHON="${NORMALCRAFTER_PYTHON:-$CONDA_PREFIX/bin/python}"
   export PATH="$CONDA_PREFIX/bin:$PATH"
 else
@@ -70,7 +79,7 @@ fi
 export HF_HOME HF_HUB_CACHE="$HF_HOME/hub" HF_XET_HIGH_PERFORMANCE=1
 export OMP_NUM_THREADS="${DROID_NORMALS_OMP_NUM_THREADS:-4}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
-mkdir -p "$HF_HOME" "$LOG_DIR"
+mkdir -p "$HF_HOME"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "ERROR: NormalCrafter Python is missing: $PYTHON" >&2
@@ -175,10 +184,11 @@ check_model() {
 
 if [[ "$CHECK_ONLY" == "1" ]]; then
   check_model
-  echo "Environment and checkpoints are ready below: $WORK_DIR"
+  echo "Environment and checkpoints are ready below: $RUNTIME_DIR"
   exit 0
 fi
 
+mkdir -p "$LOG_DIR"
 if [[ ! -d "$DATASET_DIR" ]]; then
   echo "ERROR: dataset directory does not exist: $DATASET_DIR" >&2
   exit 1
@@ -223,6 +233,8 @@ echo "Physical GPUs:    ${GPU_ARRAY[*]}"
 echo "Global shards:    $GLOBAL_WORKERS (local offset $WORKER_OFFSET)"
 echo "Attempts/video:   $MAX_ATTEMPTS"
 echo "Process passes:   $WORKER_PASSES"
+echo "Shared runtime:   $RUNTIME_DIR"
+echo "Run logs:         $LOG_DIR"
 echo "Checkpoint cache: $HF_HOME"
 echo "CUDA allocator:   $PYTORCH_CUDA_ALLOC_CONF"
 
