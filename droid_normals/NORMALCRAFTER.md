@@ -63,6 +63,14 @@ before the next video. The launcher defaults to
 fragmentation. A CUDA OOM therefore remains local to one attempt instead of
 leaving the persistent VAE in FP32 and poisoning all later tasks.
 
+Before conversion, a new experiment directory reuses the checked runtime from
+`Res/h100_1` when that directory contains the pinned NormalCrafter checkout,
+both readiness markers, and both Hugging Face model caches. This is a fixed,
+validated source rather than a filesystem-wide search. Set
+`DROID_NORMALS_RUNTIME_SOURCE=/path/to/ready/runtime` to use another checked
+runtime. If the source is absent or incomplete, conversion prepares the target
+runtime normally.
+
 Output locks contain a host, PID, Linux boot/process identity and unique owner
 token. A dead owner on the same host is reclaimed immediately. For shared
 multi-machine storage, live workers heartbeat every 30 seconds and an unknown
