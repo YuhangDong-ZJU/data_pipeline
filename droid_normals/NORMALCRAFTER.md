@@ -1,22 +1,34 @@
 # DROID normals — NormalCrafter pipeline
 
-The launcher resolves paths from its own location. The parent directory of
-`droid_normals` is treated as the ReCam project root, so commands work from any
-current directory. Entering the project root first remains the simplest form:
+The launcher resolves its code from its own location and accepts an independent
+ReCam workspace root. This keeps repositories, datasets and model resources as
+siblings without symbolic links. For example:
 
 ```bash
-cd /path/to/ReCam
+cd /path/to/ReCam/data_pipeline
+
+bash droid_normals/run_droid_normals.sh \
+  --workspace-root /path/to/ReCam \
+  --miniforge-home /path/to/miniforge3 \
+  convert 0-3 normalcrafter_v1 all
 ```
 
 Commands are launched from `droid_normals/run_droid_normals.sh`. Managed paths
-are relative to the resolved ReCam project root:
+are relative to the selected workspace root:
 
 ```text
-DATA/<dataset_name>
-Res/runtime/normalcrafter/NormalCrafter
-Res/runtime/normalcrafter/hf_cache
-Res/experiments/<exp_name>/logs
+/path/to/ReCam/DATA/<dataset_name>
+/path/to/ReCam/Res/runtime/normalcrafter/NormalCrafter
+/path/to/ReCam/Res/runtime/normalcrafter/hf_cache
+/path/to/ReCam/Res/experiments/<exp_name>/logs
 ```
+
+If `--workspace-root` is omitted, the repository root remains the workspace for
+backward compatibility. `DROID_NORMALS_WORKSPACE_ROOT` provides the same
+setting through the environment. Deployments with separate storage mounts can
+override individual locations with `DROID_NORMALS_DATASET_DIR`,
+`DROID_NORMALS_RES_DIR`, `DROID_NORMALS_RUNTIME_DIR`, and
+`DROID_NORMALS_EXPERIMENTS_DIR`.
 
 The production default is `DATA/recam_lerobot/real_world/droid`. The launcher
 passes `real_world/droid` as the only selected subset, so other real-world or
@@ -29,6 +41,7 @@ them in the repository. It checks, in order, `DROID_NORMALS_CONDA_BIN`,
 
 ```bash
 export MINIFORGE_HOME=/xxxxxx/miniforge/xxxx
+export DROID_NORMALS_WORKSPACE_ROOT=/path/to/ReCam
 
 bash droid_normals/run_droid_normals.sh \
   download 0-3 owner/recam_lerobot

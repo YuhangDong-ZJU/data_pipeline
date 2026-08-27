@@ -4,22 +4,55 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 DATASET_NAME="${DROID_NORMALS_DATASET_NAME:-recam_lerobot}"
-DATASET_DIR="$PROJECT_ROOT/DATA/$DATASET_NAME"
 CAMERAS="${DROID_NORMALS_CAMERAS:-01,02}"
 MAX_ATTEMPTS="${DROID_NORMALS_MAX_ATTEMPTS:-3}"
-RUNTIME_DIR="${DROID_NORMALS_RUNTIME_DIR:-$PROJECT_ROOT/Res/runtime/normalcrafter}"
-EXPERIMENTS_DIR="$PROJECT_ROOT/Res/experiments"
+WORKSPACE_ROOT="${DROID_NORMALS_WORKSPACE_ROOT:-$PROJECT_ROOT}"
 
 usage() {
   echo "Usage:"
-  echo "  bash $0 [--miniforge-home PATH] download <chunks> [repo_id]"
-  echo "  bash $0 [--miniforge-home PATH] install"
-  echo "  bash $0 [--miniforge-home PATH] check [gpu_id]"
-  echo "  bash $0 [--miniforge-home PATH] convert <chunks> <exp_name> [gpu_ids]"
+  echo "  bash $0 [--workspace-root PATH] [--miniforge-home PATH] download <chunks> [repo_id]"
+  echo "  bash $0 [--workspace-root PATH] [--miniforge-home PATH] install"
+  echo "  bash $0 [--workspace-root PATH] [--miniforge-home PATH] check [gpu_id]"
+  echo "  bash $0 [--workspace-root PATH] [--miniforge-home PATH] convert <chunks> <exp_name> [gpu_ids]"
   echo
-  echo "Default dataset: ./DATA/$DATASET_NAME (override with DROID_NORMALS_DATASET_NAME)."
+  echo "Default workspace: repository root (override with --workspace-root or"
+  echo "DROID_NORMALS_WORKSPACE_ROOT)."
+  echo "Dataset: <workspace>/DATA/$DATASET_NAME (override with DROID_NORMALS_DATASET_DIR)."
+  echo "Resources: <workspace>/Res (override with DROID_NORMALS_RES_DIR)."
   echo "Default cameras/retries: $CAMERAS / $MAX_ATTEMPTS."
 }
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workspace-root)
+      [[ $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+      WORKSPACE_ROOT="$2"
+      shift 2
+      ;;
+    --miniforge-home)
+      [[ $# -ge 2 && -n "$2" ]] || { usage; exit 2; }
+      export MINIFORGE_HOME="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [[ ! -d "$WORKSPACE_ROOT" ]]; then
+  echo "ERROR: workspace root does not exist: $WORKSPACE_ROOT" >&2
+  exit 1
+fi
+WORKSPACE_ROOT="$(cd -- "$WORKSPACE_ROOT" && pwd -P)"
+DATASET_DIR="$(realpath -m -- "${DROID_NORMALS_DATASET_DIR:-$WORKSPACE_ROOT/DATA/$DATASET_NAME}")"
+RES_DIR="$(realpath -m -- "${DROID_NORMALS_RES_DIR:-$WORKSPACE_ROOT/Res}")"
+RUNTIME_DIR="$(realpath -m -- "${DROID_NORMALS_RUNTIME_DIR:-$RES_DIR/runtime/normalcrafter}")"
+EXPERIMENTS_DIR="$(realpath -m -- "${DROID_NORMALS_EXPERIMENTS_DIR:-$RES_DIR/experiments}")"
 
 check_name() {
   [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || {
@@ -74,9 +107,9 @@ prepare_shared_runtime() {
   fi
 
   shopt -s nullglob
-  for candidate in "$PROJECT_ROOT"/Res/*; do
-    [[ "$candidate" == "$PROJECT_ROOT/Res/runtime" \
-      || "$candidate" == "$PROJECT_ROOT/Res/experiments" ]] && continue
+  for candidate in "$RES_DIR"/*; do
+    [[ "$candidate" == "$RES_DIR/runtime" \
+      || "$candidate" == "$RES_DIR/experiments" ]] && continue
     if runtime_ready "$candidate"; then
       candidates+=("$candidate")
     fi
@@ -93,12 +126,6 @@ prepare_shared_runtime() {
   fi
 }
 
-if [[ "${1:-}" == "--miniforge-home" ]]; then
-  [[ $# -ge 3 ]] || { usage; exit 2; }
-  export MINIFORGE_HOME="$2"
-  shift 2
-fi
-
 CONDA_BIN="${DROID_NORMALS_CONDA_BIN:-${DATA_PIPELINE_CONDA_BIN:-}}"
 if [[ -z "$CONDA_BIN" && -n "${MINIFORGE_HOME:-}" ]]; then
   CONDA_BIN="$MINIFORGE_HOME/bin/conda"
@@ -114,6 +141,10 @@ fi
 export DROID_NORMALS_CONDA_BIN="$CONDA_BIN"
 export PATH="$(dirname -- "$CONDA_BIN"):$PATH"
 check_name "$DATASET_NAME"
+echo "Workspace root:       $WORKSPACE_ROOT"
+echo "Dataset directory:    $DATASET_DIR"
+echo "Resource directory:   $RES_DIR"
+echo "NormalCrafter runtime: $RUNTIME_DIR"
 
 case "${1:-}" in
   download)
@@ -161,7 +192,7 @@ case "${1:-}" in
     prepare_shared_runtime
     export DROID_NORMALS_CHECK_ONLY=1
     exec bash "$SCRIPT_DIR/run_droid_normals_conversion.sh" \
-      "0" "$PROJECT_ROOT/DATA/.check" "${2:-0}" "$RUNTIME_DIR" \
+      "0" "$WORKSPACE_ROOT/DATA/.check" "${2:-0}" "$RUNTIME_DIR" \
       "$EXPERIMENTS_DIR/.check" "01" "1"
     ;;
 
