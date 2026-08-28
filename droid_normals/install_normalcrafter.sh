@@ -36,8 +36,12 @@ if ! "$CONDA_BIN" env list | awk '{print $1}' | grep -Fxq "$ENV_NAME"; then
 fi
 CONDA_PREFIX="$(
   "$CONDA_BIN" run -n "$ENV_NAME" python -c 'import sys; print(sys.prefix)' \
-    | tail -n 1
+    | awk 'NF { value=$0 } END { print value }'
 )"
+if [[ -z "$CONDA_PREFIX" || ! -x "$CONDA_PREFIX/bin/python" ]]; then
+  echo "ERROR: cannot resolve the Python prefix for Conda environment $ENV_NAME." >&2
+  exit 1
+fi
 export PATH="$CONDA_PREFIX/bin:$PATH"
 if [[ ! -x "$CONDA_PREFIX/bin/ffmpeg" || ! -x "$CONDA_PREFIX/bin/ffprobe" ]]; then
   "$CONDA_BIN" install -n "$ENV_NAME" --override-channels -c conda-forge ffmpeg -y
@@ -67,9 +71,9 @@ if [[ "$CURRENT_COMMIT" != "$NORMALCRAFTER_COMMIT" ]]; then
   git -C "$NORMALCRAFTER_ROOT" checkout --detach "$NORMALCRAFTER_COMMIT"
 fi
 
-if git -C "$NORMALCRAFTER_ROOT" apply --check "$PATCH"; then
+if git -C "$NORMALCRAFTER_ROOT" apply --check "$PATCH" 2>/dev/null; then
   git -C "$NORMALCRAFTER_ROOT" apply "$PATCH"
-elif git -C "$NORMALCRAFTER_ROOT" apply --reverse --check "$PATCH"; then
+elif git -C "$NORMALCRAFTER_ROOT" apply --reverse --check "$PATCH" 2>/dev/null; then
   echo "NormalCrafter long-video patch is already applied."
 else
   echo "ERROR: the long-video patch does not match $NORMALCRAFTER_ROOT." >&2
@@ -87,8 +91,14 @@ if [[ "$INSTALLED_HASH" != "$REQUIREMENTS_HASH" ]] \
   "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install --upgrade pip setuptools wheel
   "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install -r "$REQUIREMENTS"
   "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install --upgrade hf_xet
-  printf '%s\n' "$REQUIREMENTS_HASH" > "$READY_MARKER"
 fi
+
+if ! "$CONDA_PREFIX/bin/python" -c \
+    'import torch, diffusers, transformers, accelerate, xformers, decord, cv2, hf_xet'; then
+  echo "ERROR: NormalCrafter dependencies are incomplete in $CONDA_PREFIX." >&2
+  exit 1
+fi
+printf '%s\n' "$REQUIREMENTS_HASH" > "$READY_MARKER"
 
 mkdir -p "$WORK_DIR/hf_cache"
 echo "NormalCrafter environment ready."

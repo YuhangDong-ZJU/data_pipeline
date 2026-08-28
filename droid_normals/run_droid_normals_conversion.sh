@@ -70,8 +70,12 @@ if [[ "${DROID_NORMALS_SKIP_INSTALL:-0}" != "1" ]]; then
   bash "$SCRIPT_DIR/install_normalcrafter.sh" "$RUNTIME_DIR"
   CONDA_PREFIX="$(
     "$CONDA_BIN" run -n "$ENV_NAME" python -c 'import sys; print(sys.prefix)' \
-      | tail -n 1
+      | awk 'NF { value=$0 } END { print value }'
   )"
+  if [[ -z "$CONDA_PREFIX" || ! -x "$CONDA_PREFIX/bin/python" ]]; then
+    echo "ERROR: cannot resolve the Python prefix for Conda environment $ENV_NAME." >&2
+    exit 1
+  fi
   PYTHON="${NORMALCRAFTER_PYTHON:-$CONDA_PREFIX/bin/python}"
   export PATH="$CONDA_PREFIX/bin:$PATH"
 else
