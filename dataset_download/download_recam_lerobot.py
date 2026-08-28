@@ -18,25 +18,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DESTINATION = PROJECT_ROOT / "DATA" / "recam_lerobot"
 DATASET_MARKERS = frozenset({"data", "images", "meta", "videos"})
 MAX_SUBSET_DEPTH = 4
-RATE_LIMIT_MARKERS = ("429 too many requests", "http status client error (429")
 
 
 @dataclass(frozen=True)
 class SubsetLayout:
     roots: tuple[str, ...]
     chunks_by_root: dict[str, tuple[int, ...]]
-
-
-def is_rate_limit_error(error: BaseException) -> bool:
-    seen: set[int] = set()
-    current: BaseException | None = error
-    messages: list[str] = []
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        messages.append(str(current).lower())
-        current = current.__cause__ or current.__context__
-    combined = "\n".join(messages)
-    return any(marker in combined for marker in RATE_LIMIT_MARKERS)
 
 
 def normalize_subset(value: str) -> str:
@@ -314,10 +301,8 @@ def download_subset(
     workers: int,
     max_attempts: int,
     retry_delay_seconds: float,
-    rate_limit_delay_seconds: float = 310,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
-    current_workers = workers
     for attempt in range(1, max_attempts + 1):
         try:
             snapshot_download(
@@ -326,7 +311,7 @@ def download_subset(
                 revision=revision,
                 local_dir=destination,
                 allow_patterns=patterns,
-                max_workers=current_workers,
+                max_workers=workers,
             )
             validate_local_patterns(destination, patterns)
             return
@@ -335,17 +320,9 @@ def download_subset(
                 raise RuntimeError(
                     f"Subset {subset} failed after {max_attempts} attempt(s): {exc}"
                 ) from exc
-            rate_limited = is_rate_limit_error(exc)
-            if rate_limited:
-                current_workers = max(1, current_workers // 2)
-                delay = max(rate_limit_delay_seconds, retry_delay_seconds * attempt)
-                retry_kind = "RATE-LIMIT"
-            else:
-                delay = retry_delay_seconds * attempt
-                retry_kind = "RETRY"
+            delay = retry_delay_seconds * attempt
             print(
-                f"{retry_kind} {attempt + 1}/{max_attempts}: {subset}: "
-                f"waiting {delay:g}s, workers={current_workers}: "
+                f"RETRY {attempt + 1}/{max_attempts}: {subset}: "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
@@ -401,12 +378,6 @@ def parse_args() -> argparse.Namespace:
         default=float(os.environ.get("RECAM_DOWNLOAD_RETRY_DELAY_SECONDS", "5")),
     )
     parser.add_argument(
-        "--rate-limit-delay-seconds",
-        type=float,
-        default=float(os.environ.get("RECAM_DOWNLOAD_RATE_LIMIT_DELAY_SECONDS", "310")),
-        help="Minimum wait after HTTP 429 before resuming the same download.",
-    )
-    parser.add_argument(
         "--list-subsets",
         action="store_true",
         help="List remotely discovered subsets without downloading files",
@@ -427,8 +398,6 @@ def main() -> None:
         raise ValueError("--max-attempts must be positive")
     if args.retry_delay_seconds < 0:
         raise ValueError("--retry-delay-seconds cannot be negative")
-    if args.rate_limit_delay_seconds < 0:
-        raise ValueError("--rate-limit-delay-seconds cannot be negative")
     selected = normalize_subsets(args.subsets)
     modalities = normalize_modalities(args.modalities)
     chunks = parse_chunks(args.chunks)
@@ -516,7 +485,6 @@ def main() -> None:
             workers=args.workers,
             max_attempts=args.max_attempts,
             retry_delay_seconds=args.retry_delay_seconds,
-            rate_limit_delay_seconds=args.rate_limit_delay_seconds,
         )
         print(f"[{index}/{len(selected)}] COMPLETE {subset}", flush=True)
     print("Dataset download complete.", flush=True)

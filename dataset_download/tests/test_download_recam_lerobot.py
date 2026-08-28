@@ -199,39 +199,6 @@ class DownloadRetryTest(unittest.TestCase):
             self.assertEqual(calls[1]["local_dir"], destination)
             self.assertEqual(calls[1]["revision"], "commit")
 
-    def test_rate_limit_waits_for_window_and_reduces_workers(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            destination = Path(directory)
-            calls: list[dict[str, object]] = []
-
-            def fake_snapshot_download(**kwargs: object) -> str:
-                calls.append(kwargs)
-                if len(calls) == 1:
-                    raise RuntimeError("HTTP status client error (429 Too Many Requests)")
-                output = destination / "simulation" / "libero" / "meta" / "info.json"
-                output.parent.mkdir(parents=True)
-                output.write_text("{}", encoding="utf-8")
-                return str(destination)
-
-            delays: list[float] = []
-            downloader.download_subset(
-                fake_snapshot_download,
-                repo_id="owner/repo",
-                revision="commit",
-                destination=destination,
-                subset="simulation/libero",
-                patterns=["simulation/libero/meta/**"],
-                workers=4,
-                max_attempts=3,
-                retry_delay_seconds=5,
-                rate_limit_delay_seconds=310,
-                sleep=delays.append,
-            )
-
-            self.assertEqual(delays, [310])
-            self.assertEqual(calls[0]["max_workers"], 4)
-            self.assertEqual(calls[1]["max_workers"], 2)
-
 
 if __name__ == "__main__":
     unittest.main()
