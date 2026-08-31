@@ -1,0 +1,73 @@
+diff --git a/normalcrafter/normal_crafter_ppl.py b/normalcrafter/normal_crafter_ppl.py
+--- a/normalcrafter/normal_crafter_ppl.py
++++ b/normalcrafter/normal_crafter_ppl.py
+@@ -18,8 +18,23 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
+ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+ 
+-    def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance, scale=1, image_size=None):
++    def _encode_image(self, image, device, num_videos_per_prompt, do_classifier_free_guidance, scale=1, image_size=None, chunk_size=7):
+         dtype = next(self.image_encoder.parameters()).dtype
+ 
++        # NormalCrafter originally converted every video frame into one float
++        # tensor before CLIP inference.  A 1,100-frame 1024x576 episode alone
++        # occupies more than 7 GiB in FP32.  CLIP is frame-independent here, so
++        # encode bounded batches and retain only the compact embeddings.
++        if (
++            not isinstance(image, torch.Tensor)
++            and isinstance(image, list)
++            and len(image) > chunk_size
++            and not do_classifier_free_guidance
++        ):
++            return torch.cat([
++                self._encode_image(chunk, device, num_videos_per_prompt, False, scale, image_size, chunk_size)
++                for chunk in (image[start:start + chunk_size] for start in range(0, len(image), chunk_size))
++            ], dim=0)
++
+         if not isinstance(image, torch.Tensor):
+             image = self.video_processor.pil_to_numpy(image) # (0, 255) -> (0, 1)
+             image = self.video_processor.numpy_to_pt(image) # (n, h, w, c) -> (n, c, h, w)
+@@ -75,22 +90,28 @@ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+         else:
+             height, width = images[0].shape[:2]
+         needs_upcasting = self.vae.dtype == torch.float16 and self.vae.config.force_upcast
+         if needs_upcasting:
+             self.vae.to(dtype=torch.float32)
+ 
+         device = self._execution_device
+-        images = self.video_processor.preprocess_video(images, height=height, width=width).to(device, self.vae.dtype) # torch type in range(-1, 1) with (1,3,h,w)
+-        images = images.squeeze(0) # from (1, c, t, h, w) -> (c, t, h, w)
+-        images = images.permute(1,0,2,3) # c, t, h, w -> (t, c, h, w)
+-
++        # preprocess_video used to materialize the complete RGB video as a
++        # float tensor on both host and GPU even though VAE.encode was chunked.
++        # Preprocess and encode bounded slices while retaining frame order.
+         video_latents = []
+-        # chunk_size = 14
+-        for i in range(0, images.shape[0], chunk_size):                
+-            video_latents.append(self.vae.encode(images[i : i + chunk_size]).latent_dist.mode())
++        for start in range(0, len(images), chunk_size):
++            image_chunk = self.video_processor.preprocess_video(
++                images[start : start + chunk_size],
++                height=height,
++                width=width,
++            ).to(device, self.vae.dtype)
++            image_chunk = image_chunk.squeeze(0)
++            image_chunk = image_chunk.permute(1, 0, 2, 3)
++            video_latents.append(self.vae.encode(image_chunk).latent_dist.mode())
++            del image_chunk
+         image_latents = torch.cat(video_latents)
+ 
+         # cast back to fp16 if needed
+         if needs_upcasting:
+             self.vae.to(dtype=torch.float16)
+ 
+         return image_latents
+@@ -198,7 +222,7 @@ class NormalCrafterPipeline(StableVideoDiffusionPipeline):
+         decode_chunk_size = decode_chunk_size if decode_chunk_size is not None else 7
+ 
+         # 3. Encode input image using using clip. (num_image * num_videos_per_prompt, 1, 1024)
+-        image_embeddings = self._encode_image(images, device, num_videos_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, scale=encode_image_scale, image_size=encode_image_WH)
++        image_embeddings = self._encode_image(images, device, num_videos_per_prompt, do_classifier_free_guidance=do_classifier_free_guidance, scale=encode_image_scale, image_size=encode_image_WH, chunk_size=decode_chunk_size)
+         # 4. Encode input image using VAE
+         image_latents = self.ecnode_video_vae(images, chunk_size=decode_chunk_size).to(image_embeddings.dtype)
+             

@@ -235,6 +235,14 @@ if [[ "$DRY_RUN" != "1" \
   check_model
 fi
 
+# The preflight above populated and validated both pinned model revisions.  GPU
+# workers must use only that local cache; otherwise every process may create its
+# own hf-xet network pool and inflate the Pod's host-memory footprint.
+if [[ "$DRY_RUN" != "1" ]]; then
+  export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 DIFFUSERS_OFFLINE=1
+  export HF_HUB_DISABLE_XET=1
+fi
+
 IFS=',' read -r -a CAMERA_ARRAY <<<"$CAMERAS"
 SUBSET_ARGS=()
 if [[ -n "$SUBSETS" ]]; then

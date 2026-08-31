@@ -64,9 +64,10 @@ defaults to `Sponbebob4258/recam-lerobot`; an alternative repository ID remains
 accepted as the optional final argument.
 
 `check` creates the `droid_normals` conda environment, checks out the pinned
-NormalCrafter revision, applies `normalcrafter_long_video.patch`, installs the
-compatible runtime requirements, downloads both model repositories at pinned revisions into the shared
-`Res/runtime/normalcrafter/hf_cache`, and loads the model on one GPU.
+NormalCrafter revision, applies `normalcrafter_long_video.patch` and
+`normalcrafter_bounded_input.patch`, installs the compatible runtime
+requirements, downloads both model repositories at pinned revisions into the
+shared `Res/runtime/normalcrafter/hf_cache`, and loads the model on one GPU.
 
 The environment installer detects H100/H200/B100/B200 GPUs. On these machines
 it keeps an existing working PyTorch 2.8+ CUDA environment (including the
@@ -159,8 +160,15 @@ end-to-end tests. Set the subset and dataset-prefix variables to empty strings o
 standalone DROID dataset has `videos/` directly at its root.
 
 Host-memory use is bounded for multi-GPU jobs. RGB videos are decoded in
-16-frame temporary batches, freed host heap is returned after model loading and
-after each episode, and complete next-video prefetch is disabled by default.
+16-frame temporary batches, and the patched NormalCrafter pipeline preprocesses
+and encodes CLIP/VAE inputs in `decode_chunk_size` batches. This avoids the
+upstream behavior of first materializing the complete video as an FP32 tensor;
+for example, 1,100 frames at 1024x576 occupy more than 7 GiB for one such RGB
+tensor. Freed host heap is returned after model loading and after each episode,
+and complete next-video prefetch is disabled by default. After checkpoint
+preflight, workers are forced to use the local Hugging Face cache and do not
+start per-process Xet download pools.
+
 These are operational settings and do not change the annotation fingerprint, so
 existing valid MP4/JSON outputs remain resumable. Override the temporary decode
 batch with `DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE`. Machines with sufficient

@@ -13,7 +13,8 @@ WORK_DIR="$1"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 NORMALCRAFTER_ROOT="$WORK_DIR/NormalCrafter"
 NORMALCRAFTER_COMMIT="75af9887a2cb14cd1ce3883c5773bc296565777c"
-PATCH="$SCRIPT_DIR/normalcrafter_long_video.patch"
+LONG_VIDEO_PATCH="$SCRIPT_DIR/normalcrafter_long_video.patch"
+BOUNDED_INPUT_PATCH="$SCRIPT_DIR/normalcrafter_bounded_input.patch"
 ENV_PROFILE="${DROID_NORMALS_ENV_PROFILE:-auto}"
 ATTENTION_BACKEND="${DROID_NORMALS_ATTENTION_BACKEND:-auto}"
 H100_TORCH_VERSION="${DROID_NORMALS_H100_TORCH_VERSION:-2.8.0}"
@@ -100,14 +101,20 @@ if [[ "$CURRENT_COMMIT" != "$NORMALCRAFTER_COMMIT" ]]; then
   git -C "$NORMALCRAFTER_ROOT" checkout --detach "$NORMALCRAFTER_COMMIT"
 fi
 
-if git -C "$NORMALCRAFTER_ROOT" apply --check "$PATCH" 2>/dev/null; then
-  git -C "$NORMALCRAFTER_ROOT" apply "$PATCH"
-elif git -C "$NORMALCRAFTER_ROOT" apply --reverse --check "$PATCH" 2>/dev/null; then
-  echo "NormalCrafter long-video patch is already applied."
-else
-  echo "ERROR: the long-video patch does not match $NORMALCRAFTER_ROOT." >&2
-  exit 1
-fi
+apply_runtime_patch() {
+  local patch_path="$1"
+  local patch_name="$2"
+  if git -C "$NORMALCRAFTER_ROOT" apply --check "$patch_path" 2>/dev/null; then
+    git -C "$NORMALCRAFTER_ROOT" apply "$patch_path"
+  elif git -C "$NORMALCRAFTER_ROOT" apply --reverse --check "$patch_path" 2>/dev/null; then
+    echo "NormalCrafter $patch_name patch is already applied."
+  else
+    echo "ERROR: the $patch_name patch does not match $NORMALCRAFTER_ROOT." >&2
+    exit 1
+  fi
+}
+apply_runtime_patch "$LONG_VIDEO_PATCH" "long-video"
+apply_runtime_patch "$BOUNDED_INPUT_PATCH" "bounded-input"
 
 REQUIREMENTS="$NORMALCRAFTER_ROOT/requirements.txt"
 REQUIREMENTS_HASH="$(sha256sum "$REQUIREMENTS" | awk '{print $1}')"

@@ -954,6 +954,13 @@ class NormalCrafterRunner:
                     "NormalCrafter long-video patch is not applied. "
                     "See droid_normals/NORMALCRAFTER.md."
                 )
+            if "chunk_size" not in inspect.signature(
+                NormalCrafterPipeline._encode_image
+            ).parameters:
+                raise RuntimeError(
+                    "NormalCrafter bounded-input patch is not applied. "
+                    "Run install_normalcrafter.sh again."
+                )
 
             self.torch = torch
             self.inference_dtype = torch.float16
@@ -970,6 +977,7 @@ class NormalCrafterRunner:
                 args.unet_path,
                 subfolder="vae",
                 revision=args.unet_revision,
+                low_cpu_mem_usage=True,
             )
             vae.to(dtype=torch.float16)
             unet.to(dtype=torch.float16)
@@ -980,6 +988,7 @@ class NormalCrafterRunner:
                 torch_dtype=torch.float16,
                 variant="fp16",
                 revision=args.pretrain_revision,
+                low_cpu_mem_usage=True,
             )
             self.pipe.set_progress_bar_config(disable=not self.verbose_inference)
             if args.cpu_offload == "none":
