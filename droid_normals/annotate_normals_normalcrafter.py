@@ -30,6 +30,8 @@ import numpy as np
 
 _STOP = object()
 _ABORT = object()
+_PAGE_CACHE_WARNING_LOCK = threading.Lock()
+_PAGE_CACHE_WARNINGS: set[str] = set()
 NORMALCRAFTER_COMMIT = "75af9887a2cb14cd1ce3883c5773bc296565777c"
 DEFAULT_UNET_PATH = "Yanrui95/NormalCrafter"
 DEFAULT_UNET_REVISION = "7e24d68d86ae008fe08ef50b4e51cd2fc2c8cf57"
@@ -252,6 +254,67 @@ def release_host_memory() -> None:
     malloc_trim.argtypes = [ctypes.c_size_t]
     malloc_trim.restype = ctypes.c_int
     malloc_trim(0)
+
+
+def _warn_page_cache_once(key: str, message: str) -> None:
+    """Report unsupported cache advice once without failing annotation work."""
+    with _PAGE_CACHE_WARNING_LOCK:
+        if key in _PAGE_CACHE_WARNINGS:
+            return
+        _PAGE_CACHE_WARNINGS.add(key)
+    print(f"WARNING: {message}", file=sys.stderr, flush=True)
+
+
+def release_file_page_cache(path: Path, *, sync_before_release: bool = False) -> bool:
+    """Best-effort release of one finished file's Linux page-cache residency.
+
+    This never changes or removes the file. Output files are synchronized before
+    advice so their dirty pages become eligible for eviction. Unsupported file
+    systems and permission errors are warnings rather than annotation failures.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    posix_fadvise = getattr(os, "posix_fadvise", None)
+    dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if posix_fadvise is None or dontneed is None:
+        _warn_page_cache_once(
+            "unsupported",
+            "POSIX_FADV_DONTNEED is unavailable; file page cache will rely on kernel reclaim.",
+        )
+        return False
+
+    flags = (os.O_RDWR if sync_before_release else os.O_RDONLY) | getattr(
+        os, "O_CLOEXEC", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        _warn_page_cache_once(
+            f"open:{exc.errno}",
+            f"cannot open a completed file for page-cache release ({exc}); continuing.",
+        )
+        return False
+
+    try:
+        if sync_before_release:
+            try:
+                os.fsync(descriptor)
+            except OSError as exc:
+                _warn_page_cache_once(
+                    f"fsync:{exc.errno}",
+                    f"cannot synchronize an output before page-cache release ({exc}); continuing.",
+                )
+        try:
+            posix_fadvise(descriptor, 0, 0, dontneed)
+        except OSError as exc:
+            _warn_page_cache_once(
+                f"fadvise:{exc.errno}",
+                f"the filesystem rejected POSIX_FADV_DONTNEED ({exc}); continuing.",
+            )
+            return False
+        return True
+    finally:
+        os.close(descriptor)
 
 
 def discover_subset_roots(dataset_root: Path) -> list[Path]:
@@ -1223,6 +1286,10 @@ def process_task(
             **vars(output_info),
             "size_bytes": task.output_path.stat().st_size,
         }
+        output_cache_released = release_file_page_cache(
+            task.output_path,
+            sync_before_release=True,
+        )
         payload: dict[str, Any] = {
             "status": "complete",
             "method": "NormalCrafter",
@@ -1246,6 +1313,10 @@ def process_task(
                 "crf": args.crf,
                 "pixel_format": "yuv420p",
                 "pytorch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),
+                "file_page_cache_release": {
+                    "input": "best_effort_after_attempt",
+                    "output_released": output_cache_released,
+                },
             },
             "model_load_seconds": runner.load_seconds,
             "attempt": attempt,
@@ -1299,6 +1370,7 @@ def print_plan(
     print(f"  Output:           {args.output_width}x{args.output_height} H.264 CRF {args.crf}")
     print(f"  RGB decode batch: {args.video_decode_batch_size} frame(s)")
     print(f"  Next-video fetch: {'on' if args.prefetch_next_video else 'off'}")
+    print("  File page cache:  release input/output after each attempt (Linux best effort)")
     for task in tasks[: args.print_limit]:
         print(f"  {task.input_path} -> {task.output_path}")
     if len(tasks) > args.print_limit:
@@ -1401,6 +1473,7 @@ def main() -> None:
                 finally:
                     if frames is not None:
                         del frames
+                    release_file_page_cache(task.input_path)
                     restored = runner.reset_after_attempt(clear_cuda_cache=attempt_failed)
                     if restored:
                         print(

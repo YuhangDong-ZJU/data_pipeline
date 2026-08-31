@@ -169,6 +169,14 @@ and complete next-video prefetch is disabled by default. After checkpoint
 preflight, workers are forced to use the local Hugging Face cache and do not
 start per-process Xet download pools.
 
+On Linux, each worker also gives the kernel `POSIX_FADV_DONTNEED` advice after
+all reads of an input RGB MP4 are complete. A verified output MP4 is synchronized
+and receives the same advice before its metadata is committed. Closing a file
+alone does not evict Linux page-cache pages; this best-effort advice prevents a
+long sequential dataset scan from charging hundreds of GiB of inactive file
+cache to a memory-limited Kubernetes Pod. It never deletes or modifies an input,
+and unsupported filesystems only produce one warning per worker.
+
 These are operational settings and do not change the annotation fingerprint, so
 existing valid MP4/JSON outputs remain resumable. Override the temporary decode
 batch with `DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE`. Machines with sufficient

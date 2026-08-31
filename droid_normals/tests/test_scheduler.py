@@ -138,6 +138,52 @@ class HostMemoryTest(unittest.TestCase):
         self.assertEqual(readers[1].kwargs["height"], 576)
         release.assert_called_once()
 
+    def test_input_page_cache_release_is_read_only(self) -> None:
+        with patch.object(worker.sys, "platform", "linux"):
+            with patch.object(worker.os, "open", return_value=17) as open_file:
+                with patch.object(worker.os, "close") as close_file:
+                    with patch.object(worker.os, "posix_fadvise") as advise:
+                        released = worker.release_file_page_cache(Path("input.mp4"))
+
+        self.assertTrue(released)
+        open_file.assert_called_once_with(
+            Path("input.mp4"), worker.os.O_RDONLY | getattr(worker.os, "O_CLOEXEC", 0)
+        )
+        advise.assert_called_once_with(17, 0, 0, worker.os.POSIX_FADV_DONTNEED)
+        close_file.assert_called_once_with(17)
+
+    def test_output_page_cache_is_synced_before_release(self) -> None:
+        with patch.object(worker.sys, "platform", "linux"):
+            with patch.object(worker.os, "open", return_value=23) as open_file:
+                with patch.object(worker.os, "close") as close_file:
+                    with patch.object(worker.os, "fsync") as synchronize:
+                        with patch.object(worker.os, "posix_fadvise") as advise:
+                            released = worker.release_file_page_cache(
+                                Path("output.mp4"), sync_before_release=True
+                            )
+
+        self.assertTrue(released)
+        open_file.assert_called_once_with(
+            Path("output.mp4"), worker.os.O_RDWR | getattr(worker.os, "O_CLOEXEC", 0)
+        )
+        synchronize.assert_called_once_with(23)
+        advise.assert_called_once_with(23, 0, 0, worker.os.POSIX_FADV_DONTNEED)
+        close_file.assert_called_once_with(23)
+
+    def test_page_cache_release_failure_is_nonfatal(self) -> None:
+        with patch.object(worker.sys, "platform", "linux"):
+            with patch.object(worker.os, "open", return_value=29):
+                with patch.object(worker.os, "close") as close_file:
+                    with patch.object(
+                        worker.os,
+                        "posix_fadvise",
+                        side_effect=OSError(95, "operation not supported"),
+                    ):
+                        released = worker.release_file_page_cache(Path("remote.mp4"))
+
+        self.assertFalse(released)
+        close_file.assert_called_once_with(29)
+
 class ResumeSchedulerTest(unittest.TestCase):
     def make_task(self, root: Path, index: int) -> worker.NormalTask:
         episode = f"episode_{index:06d}"
