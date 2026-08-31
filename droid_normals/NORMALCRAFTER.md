@@ -135,6 +135,17 @@ runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
 end-to-end tests. Set the subset and dataset-prefix variables to empty strings only when a
 standalone DROID dataset has `videos/` directly at its root.
 
+Host-memory use is bounded for multi-GPU jobs. RGB videos are decoded in
+16-frame temporary batches, freed host heap is returned after model loading and
+after each episode, and complete next-video prefetch is disabled by default.
+These are operational settings and do not change the annotation fingerprint, so
+existing valid MP4/JSON outputs remain resumable. Override the temporary decode
+batch with `DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE`. Machines with sufficient
+unconstrained host RAM may opt back into decode/inference overlap with
+`DROID_NORMALS_PREFETCH_NEXT_VIDEO=1`. The launcher also defaults
+`MALLOC_ARENA_MAX=2` to reduce retained glibc heap pages across decoder and
+encoder threads.
+
 The high-level command intentionally mirrors `droid-metric-depth`:
 
 ```text

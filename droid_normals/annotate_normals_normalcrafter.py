@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import gc
 import hashlib
 import json
@@ -165,6 +166,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--time-step-size", type=int, default=10)
     parser.add_argument("--decode-chunk-size", type=int, default=7)
     parser.add_argument(
+        "--video-decode-batch-size",
+        type=int,
+        default=16,
+        help="Decode at most this many RGB frames into a temporary NumPy batch",
+    )
+    parser.add_argument(
+        "--prefetch-next-video",
+        action="store_true",
+        help="Decode the next complete video in the background; disabled by default",
+    )
+    parser.add_argument(
         "--max-res",
         type=int,
         default=1024,
@@ -198,6 +210,7 @@ def validate_args(args: argparse.Namespace) -> None:
         "window_size",
         "time_step_size",
         "decode_chunk_size",
+        "video_decode_batch_size",
         "max_res",
         "output_width",
         "output_height",
@@ -218,6 +231,21 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--max-attempts must be at least 1")
     if args.retry_delay_seconds < 0:
         raise ValueError("--retry-delay-seconds cannot be negative")
+
+
+def release_host_memory() -> None:
+    """Collect Python objects and return free glibc heap pages to the host."""
+    gc.collect()
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        libc = ctypes.CDLL(None)
+        malloc_trim = libc.malloc_trim
+    except (AttributeError, OSError):
+        return
+    malloc_trim.argtypes = [ctypes.c_size_t]
+    malloc_trim.restype = ctypes.c_int
+    malloc_trim(0)
 
 
 def discover_subset_roots(dataset_root: Path) -> list[Path]:
@@ -961,7 +989,6 @@ class NormalCrafterRunner:
     def reset_after_attempt(self, *, clear_cuda_cache: bool = False) -> list[str]:
         """Release task allocations and clear CUDA cache only after abnormal attempts."""
         torch = self.torch
-        gc.collect()
         needs_dtype_restore = any(
             getattr(self.pipe, name).dtype != self.inference_dtype for name in ("vae", "unet")
         )
@@ -969,8 +996,8 @@ class NormalCrafterRunner:
             torch.cuda.empty_cache()
         restored = self.restore_model_dtypes()
         if restored:
-            gc.collect()
             torch.cuda.empty_cache()
+        release_host_memory()
         return restored
 
     def load_video(self, task: NormalTask, args: argparse.Namespace) -> tuple[list[Any], float]:
@@ -986,7 +1013,10 @@ class NormalCrafterRunner:
         from PIL import Image
 
         probe = VideoReader(str(task.input_path), ctx=cpu(0))
-        original_height, original_width = probe.get_batch([0]).shape[1:3]
+        try:
+            original_height, original_width = probe.get_batch([0]).shape[1:3]
+        finally:
+            del probe
         if max(original_height, original_width) > args.max_res:
             scale = args.max_res / max(original_height, original_width)
             height = round(original_height * scale)
@@ -1005,8 +1035,25 @@ class NormalCrafterRunner:
         frame_indexes = list(range(0, len(video), stride))
         if args.process_length != -1:
             frame_indexes = frame_indexes[: args.process_length]
-        frames = video.get_batch(frame_indexes).asnumpy().astype(np.uint8)
-        return [Image.fromarray(frame) for frame in frames], float(fps)
+        frames: list[Any] = []
+        try:
+            for start in range(0, len(frame_indexes), args.video_decode_batch_size):
+                indexes = frame_indexes[start : start + args.video_decode_batch_size]
+                batch = video.get_batch(indexes).asnumpy()
+                if batch.dtype != np.uint8:
+                    batch = batch.astype(np.uint8)
+                for frame in batch:
+                    source = Image.fromarray(np.ascontiguousarray(frame))
+                    try:
+                        # Detach each PIL image from the temporary Decord/NumPy batch.
+                        frames.append(source.copy())
+                    finally:
+                        source.close()
+                del batch
+        finally:
+            del video
+            release_host_memory()
+        return frames, float(fps)
 
     def infer(
         self,
@@ -1224,6 +1271,8 @@ def print_plan(
     print(f"  Pending on shard: {len(tasks)}")
     print(f"  Model max side:   {args.max_res}")
     print(f"  Output:           {args.output_width}x{args.output_height} H.264 CRF {args.crf}")
+    print(f"  RGB decode batch: {args.video_decode_batch_size} frame(s)")
+    print(f"  Next-video fetch: {'on' if args.prefetch_next_video else 'off'}")
     for task in tasks[: args.print_limit]:
         print(f"  {task.input_path} -> {task.output_path}")
     if len(tasks) > args.print_limit:
@@ -1263,17 +1312,22 @@ def main() -> None:
         torch.set_float32_matmul_precision("high")
     print(f"Loading NormalCrafter once for {len(tasks)} video(s)...", flush=True)
     runner = NormalCrafterRunner(args)
+    release_host_memory()
     print(f"NormalCrafter loaded in {runner.load_seconds:.1f}s.", flush=True)
     succeeded = 0
     failed = 0
     skipped = 0
     locked = 0
 
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-prefetch") as pool:
-        future: Future[tuple[list[Any], float]] = pool.submit(runner.load_video, tasks[0], args)
+    pool: ThreadPoolExecutor | None = None
+    future: Future[tuple[list[Any], float]] | None = None
+    if args.prefetch_next_video:
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="video-prefetch")
+        future = pool.submit(runner.load_video, tasks[0], args)
+    try:
         for index, task in enumerate(tasks):
             current_future = future
-            if index + 1 < len(tasks):
+            if pool is not None and index + 1 < len(tasks):
                 future = pool.submit(runner.load_video, tasks[index + 1], args)
             print(
                 f"[{index + 1}/{len(tasks)}] {task.chunk} | "
@@ -1288,7 +1342,10 @@ def main() -> None:
                 retrying = False
                 try:
                     if attempt == 1:
-                        frames, fps = current_future.result()
+                        if current_future is None:
+                            frames, fps = runner.load_video(task, args)
+                        else:
+                            frames, fps = current_future.result()
                     else:
                         frames, fps = runner.load_video(task, args)
                     result = process_task(
@@ -1342,6 +1399,9 @@ def main() -> None:
                 locked += 1
             else:
                 skipped += 1
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
 
     remaining = [task for task in tasks if not task_is_complete(task, expected_config)]
     print(

@@ -20,6 +20,8 @@ MAX_ATTEMPTS="${7:-3}"
 CHECK_ONLY="${DROID_NORMALS_CHECK_ONLY:-0}"
 DRY_RUN="${DROID_NORMALS_DRY_RUN:-0}"
 VERBOSE_INFERENCE="${DROID_NORMALS_VERBOSE_INFERENCE:-0}"
+PREFETCH_NEXT_VIDEO="${DROID_NORMALS_PREFETCH_NEXT_VIDEO:-0}"
+VIDEO_DECODE_BATCH_SIZE="${DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE:-16}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 WORKER="$SCRIPT_DIR/annotate_normals_normalcrafter.py"
@@ -40,8 +42,13 @@ if [[ ! "$MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ "$CHECK_ONLY" != "0" && "$CHECK_ONLY" != "1" \
     || "$DRY_RUN" != "0" && "$DRY_RUN" != "1" \
-    || "$VERBOSE_INFERENCE" != "0" && "$VERBOSE_INFERENCE" != "1" ]]; then
-  echo "ERROR: check-only, dry-run and verbose-inference settings must be 0 or 1." >&2
+    || "$VERBOSE_INFERENCE" != "0" && "$VERBOSE_INFERENCE" != "1" \
+    || "$PREFETCH_NEXT_VIDEO" != "0" && "$PREFETCH_NEXT_VIDEO" != "1" ]]; then
+  echo "ERROR: check-only, dry-run, verbose-inference and prefetch settings must be 0 or 1." >&2
+  exit 2
+fi
+if [[ ! "$VIDEO_DECODE_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE must be a positive integer." >&2
   exit 2
 fi
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -88,6 +95,7 @@ else
 fi
 export HF_HOME HF_HUB_CACHE="$HF_HOME/hub" HF_XET_HIGH_PERFORMANCE=1
 export OMP_NUM_THREADS="${DROID_NORMALS_OMP_NUM_THREADS:-4}"
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-max_split_size_mb:128}"
 mkdir -p "$HF_HOME"
 
@@ -252,6 +260,7 @@ echo "Shared runtime:   $RUNTIME_DIR"
 echo "Run logs:         $LOG_DIR"
 echo "Checkpoint cache: $HF_HOME"
 echo "CUDA allocator:   $PYTORCH_CUDA_ALLOC_CONF"
+echo "glibc arenas:      $MALLOC_ARENA_MAX"
 
 RUN_TAG="$(date +%Y%m%d-%H%M%S)-chunks-${CHUNKS//,/_}"
 WORKER_MODE_ARGS=()
@@ -259,6 +268,10 @@ if [[ "$DRY_RUN" == "1" ]]; then
   WORKER_MODE_ARGS+=(--dry-run)
 fi
 WORKER_MODE_ARGS+=("${VERBOSE_ARGS[@]}")
+WORKER_MODE_ARGS+=(--video-decode-batch-size "$VIDEO_DECODE_BATCH_SIZE")
+if [[ "$PREFETCH_NEXT_VIDEO" == "1" ]]; then
+  WORKER_MODE_ARGS+=(--prefetch-next-video)
+fi
 FINAL_FAILED=0
 for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
   echo "Starting asynchronous GPU worker pass $PASS/$WORKER_PASSES."

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,112 @@ class ChunkParsingTest(unittest.TestCase):
                 "chunk-009",
             },
         )
+
+
+class HostMemoryTest(unittest.TestCase):
+    def make_config_args(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            unet_path=worker.DEFAULT_UNET_PATH,
+            unet_revision=worker.DEFAULT_UNET_REVISION,
+            pretrain_path=worker.DEFAULT_PRETRAIN_PATH,
+            pretrain_revision=worker.DEFAULT_PRETRAIN_REVISION,
+            target_fps=15,
+            process_length=-1,
+            max_res=1024,
+            window_size=14,
+            time_step_size=10,
+            decode_chunk_size=7,
+            seed=42,
+            cpu_offload="none",
+            output_width=1280,
+            output_height=720,
+            crf=17,
+            ffmpeg_preset="veryfast",
+        )
+
+    def test_memory_controls_do_not_change_annotation_fingerprint(self) -> None:
+        first = self.make_config_args()
+        first.video_decode_batch_size = 16
+        first.prefetch_next_video = False
+        second = self.make_config_args()
+        second.video_decode_batch_size = 64
+        second.prefetch_next_video = True
+
+        self.assertEqual(worker.annotation_config(first), worker.annotation_config(second))
+
+    def test_video_is_decoded_in_bounded_batches(self) -> None:
+        readers: list[object] = []
+
+        class FakeBatch:
+            def __init__(self, indexes: list[int], probe: bool) -> None:
+                self.shape = (len(indexes), 720, 1280, 3) if probe else None
+                self.array = worker.np.zeros(
+                    (len(indexes), 2, 2, 3), dtype=worker.np.uint8
+                )
+
+            def asnumpy(self) -> worker.np.ndarray:
+                return self.array
+
+        class FakeVideoReader:
+            def __init__(self, _path: str, **kwargs: object) -> None:
+                self.kwargs = kwargs
+                self.calls: list[list[int]] = []
+                self.probe = "width" not in kwargs
+                readers.append(self)
+
+            def __len__(self) -> int:
+                return 5
+
+            def get_avg_fps(self) -> float:
+                return 15.0
+
+            def get_batch(self, indexes: list[int]) -> FakeBatch:
+                self.calls.append(list(indexes))
+                return FakeBatch(list(indexes), self.probe)
+
+        class FakeImage:
+            def copy(self) -> object:
+                return object()
+
+            def close(self) -> None:
+                pass
+
+        decord = types.ModuleType("decord")
+        decord.VideoReader = FakeVideoReader
+        decord.cpu = lambda index: index
+        pil = types.ModuleType("PIL")
+        pil.Image = SimpleNamespace(fromarray=lambda _frame: FakeImage())
+        runner = worker.NormalCrafterRunner.__new__(worker.NormalCrafterRunner)
+        runner.verbose_inference = False
+        task = worker.NormalTask(
+            subset_root=Path("."),
+            subset_relative=Path("."),
+            chunk="chunk-000",
+            input_camera="observation.images.rgb_01",
+            output_camera="observation.images.normal_01",
+            episode="episode_000000",
+            input_path=Path("episode_000000.mp4"),
+            output_path=Path("normal.mp4"),
+            metadata_path=Path("normal.json"),
+        )
+        args = SimpleNamespace(
+            process_length=-1,
+            target_fps=15,
+            max_res=1024,
+            video_decode_batch_size=2,
+        )
+
+        with patch.dict(sys.modules, {"decord": decord, "PIL": pil}):
+            with patch.object(worker, "release_host_memory") as release:
+                frames, fps = runner.load_video(task, args)
+
+        self.assertEqual(len(frames), 5)
+        self.assertEqual(fps, 15.0)
+        self.assertEqual(readers[0].calls, [[0]])
+        self.assertEqual(readers[1].calls, [[0, 1], [2, 3], [4]])
+        self.assertEqual(readers[1].kwargs["width"], 1024)
+        self.assertEqual(readers[1].kwargs["height"], 576)
+        release.assert_called_once()
 
 class ResumeSchedulerTest(unittest.TestCase):
     def make_task(self, root: Path, index: int) -> worker.NormalTask:
