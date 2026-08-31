@@ -22,6 +22,7 @@ DRY_RUN="${DROID_NORMALS_DRY_RUN:-0}"
 VERBOSE_INFERENCE="${DROID_NORMALS_VERBOSE_INFERENCE:-0}"
 PREFETCH_NEXT_VIDEO="${DROID_NORMALS_PREFETCH_NEXT_VIDEO:-0}"
 VIDEO_DECODE_BATCH_SIZE="${DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE:-16}"
+ATTENTION_BACKEND="${DROID_NORMALS_ATTENTION_BACKEND:-auto}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 WORKER="$SCRIPT_DIR/annotate_normals_normalcrafter.py"
@@ -49,6 +50,18 @@ if [[ "$CHECK_ONLY" != "0" && "$CHECK_ONLY" != "1" \
 fi
 if [[ ! "$VIDEO_DECODE_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE must be a positive integer." >&2
+  exit 2
+fi
+if [[ "$ATTENTION_BACKEND" == "auto" ]]; then
+  GPU_NAMES="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
+  if grep -Eiq 'H100|H200|B100|B200' <<<"$GPU_NAMES"; then
+    ATTENTION_BACKEND="pytorch"
+  else
+    ATTENTION_BACKEND="xformers"
+  fi
+fi
+if [[ "$ATTENTION_BACKEND" != "pytorch" && "$ATTENTION_BACKEND" != "xformers" ]]; then
+  echo "ERROR: DROID_NORMALS_ATTENTION_BACKEND must be auto, pytorch or xformers." >&2
   exit 2
 fi
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -200,6 +213,7 @@ check_model() {
     --pretrain-path "$PRETRAIN_PATH" \
     --pretrain-revision "$PRETRAIN_REVISION" \
     --cpu-offload "${DROID_NORMALS_CPU_OFFLOAD:-none}" \
+    --attention-backend "$ATTENTION_BACKEND" \
     "${VERBOSE_ARGS[@]}"
   printf '%s\n' "$MODEL_READY_VALUE" > "$MODEL_READY_MARKER"
 }
@@ -261,6 +275,7 @@ echo "Run logs:         $LOG_DIR"
 echo "Checkpoint cache: $HF_HOME"
 echo "CUDA allocator:   $PYTORCH_CUDA_ALLOC_CONF"
 echo "glibc arenas:      $MALLOC_ARENA_MAX"
+echo "Attention:        $ATTENTION_BACKEND"
 
 RUN_TAG="$(date +%Y%m%d-%H%M%S)-chunks-${CHUNKS//,/_}"
 WORKER_MODE_ARGS=()
@@ -297,6 +312,7 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
         --stale-lock-hours "${DROID_NORMALS_STALE_LOCK_HOURS:-0.25}" \
         --lock-heartbeat-seconds "${DROID_NORMALS_LOCK_HEARTBEAT_SECONDS:-30}" \
         --cpu-offload "${DROID_NORMALS_CPU_OFFLOAD:-none}" \
+        --attention-backend "$ATTENTION_BACKEND" \
         --max-res "${DROID_NORMALS_MAX_RES:-1024}" \
         --output-width "${DROID_NORMALS_OUTPUT_WIDTH:-1280}" \
         --output-height "${DROID_NORMALS_OUTPUT_HEIGHT:-720}" \

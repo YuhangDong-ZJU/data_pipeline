@@ -56,9 +56,11 @@ class HostMemoryTest(unittest.TestCase):
         first = self.make_config_args()
         first.video_decode_batch_size = 16
         first.prefetch_next_video = False
+        first.attention_backend = "pytorch"
         second = self.make_config_args()
         second.video_decode_batch_size = 64
         second.prefetch_next_video = True
+        second.attention_backend = "xformers"
 
         self.assertEqual(worker.annotation_config(first), worker.annotation_config(second))
 

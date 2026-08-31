@@ -19,6 +19,11 @@ def main() -> None:
     parser.add_argument("--pretrain-path")
     parser.add_argument("--pretrain-revision")
     parser.add_argument("--cpu-offload", choices=["none", "model", "sequential"], default="none")
+    parser.add_argument(
+        "--attention-backend",
+        choices=["auto", "pytorch", "xformers"],
+        default="auto",
+    )
     parser.add_argument("--verbose-inference", action="store_true")
     args = parser.parse_args()
 
@@ -41,6 +46,7 @@ def main() -> None:
             pretrain_path=args.pretrain_path or module.DEFAULT_PRETRAIN_PATH,
             pretrain_revision=args.pretrain_revision or module.DEFAULT_PRETRAIN_REVISION,
             cpu_offload=args.cpu_offload,
+            attention_backend=args.attention_backend,
             verbose_inference=args.verbose_inference,
         )
     )

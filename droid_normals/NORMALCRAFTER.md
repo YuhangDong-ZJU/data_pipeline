@@ -64,9 +64,29 @@ defaults to `Sponbebob4258/recam-lerobot`; an alternative repository ID remains
 accepted as the optional final argument.
 
 `check` creates the `droid_normals` conda environment, checks out the pinned
-NormalCrafter revision, applies `normalcrafter_long_video.patch`, installs its
-pinned requirements, downloads both model repositories at pinned revisions into the shared
+NormalCrafter revision, applies `normalcrafter_long_video.patch`, installs the
+compatible runtime requirements, downloads both model repositories at pinned revisions into the shared
 `Res/runtime/normalcrafter/hf_cache`, and loads the model on one GPU.
+
+The environment installer detects H100/H200/B100/B200 GPUs. On these machines
+it keeps an existing working PyTorch 2.8+ CUDA environment (including the
+partner cluster's PyTorch 2.8.0+cu129 environment), or installs the official
+PyTorch 2.8 CUDA 12.8 wheel when the existing Torch cannot execute an actual
+GPU kernel. The partner's CUDA 12.9 driver supports the CUDA 12.8 wheel. Other
+GPUs retain the original NormalCrafter dependency profile.
+Override automatic selection with `DROID_NORMALS_ENV_PROFILE=h100` or
+`DROID_NORMALS_ENV_PROFILE=legacy`; an internal Torch mirror can be selected
+with `DROID_NORMALS_H100_TORCH_INDEX_URL`.
+
+PyTorch attention is selected automatically on H100-class GPUs and does not
+depend on an optional xFormers CUDA extension. Existing 4090 machines retain
+xFormers by default to preserve their lower-memory execution path. Set
+`DROID_NORMALS_ATTENTION_BACKEND=pytorch` or `xformers` to override detection;
+select xFormers on H100 only when the environment check confirms a working
+xFormers kernel. The check now
+runs real Torch (and, when requested, xFormers) CUDA kernels, so a wheel that
+merely imports but lacks the H100 architecture is rejected before model
+download or multi-GPU worker startup.
 
 `convert` starts one background process per selected physical GPU. Each process
 loads one persistent model and owns a stable shard of the full discovered task
@@ -129,7 +149,10 @@ If machines receive disjoint chunks, no global settings are necessary. Useful
 runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
 `DROID_NORMALS_RETRY_DELAY_SECONDS`, `DROID_NORMALS_MAX_RES`,
 `DROID_NORMALS_CRF`, `DROID_NORMALS_CPU_OFFLOAD`, `DROID_NORMALS_SUBSETS`, and
-`DROID_NORMALS_DATASET_PREFIX`. Lock lease behavior can be overridden with
+`DROID_NORMALS_DATASET_PREFIX`. Environment overrides include
+`DROID_NORMALS_ENV_PROFILE`, `DROID_NORMALS_ATTENTION_BACKEND`,
+`DROID_NORMALS_H100_TORCH_VERSION`, `DROID_NORMALS_H100_XFORMERS_VERSION`, and
+`DROID_NORMALS_H100_TORCH_INDEX_URL`. Lock lease behavior can be overridden with
 `DROID_NORMALS_STALE_LOCK_HOURS` and `DROID_NORMALS_LOCK_HEARTBEAT_SECONDS`.
 `DROID_NORMALS_EPISODES` accepts a comma-separated episode list for bounded
 end-to-end tests. Set the subset and dataset-prefix variables to empty strings only when a

@@ -159,6 +159,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--pretrain-revision", default=DEFAULT_PRETRAIN_REVISION)
     parser.add_argument("--cpu-offload", choices=["none", "model", "sequential"], default="none")
+    parser.add_argument(
+        "--attention-backend",
+        choices=["auto", "pytorch", "xformers"],
+        default="auto",
+        help="Attention implementation; PyTorch avoids optional CUDA extension coupling",
+    )
     parser.add_argument("--process-length", type=int, default=-1)
     parser.add_argument("--target-fps", type=int, default=15)
     parser.add_argument("--seed", type=int, default=42)
@@ -918,6 +924,7 @@ class NormalCrafterRunner:
         sys.path.insert(0, str(root))
 
         self.verbose_inference = bool(getattr(args, "verbose_inference", False))
+        requested_attention = getattr(args, "attention_backend", "auto")
         with ExitStack() as stack:
             if not self.verbose_inference:
                 devnull = stack.enter_context(open(os.devnull, "w", encoding="utf-8"))
@@ -931,6 +938,16 @@ class NormalCrafterRunner:
             from normalcrafter.normal_crafter_ppl import NormalCrafterPipeline
             from normalcrafter.unet import DiffusersUNetSpatioTemporalConditionModelNormalCrafter
             from normalcrafter.utils import read_video_frames
+
+            if requested_attention == "auto":
+                gpu_name = torch.cuda.get_device_name(0)
+                self.attention_backend = (
+                    "pytorch"
+                    if re.search(r"H100|H200|B100|B200", gpu_name, re.IGNORECASE)
+                    else "xformers"
+                )
+            else:
+                self.attention_backend = requested_attention
 
             if "output_type" not in inspect.signature(NormalCrafterPipeline.__call__).parameters:
                 raise RuntimeError(
@@ -972,10 +989,9 @@ class NormalCrafterRunner:
             else:
                 self.pipe.enable_sequential_cpu_offload()
             self.load_seconds = time.monotonic() - load_started
-        try:
+        if self.attention_backend == "xformers":
             self.pipe.enable_xformers_memory_efficient_attention()
-        except Exception as exc:
-            print(f"WARNING: xFormers is unavailable: {exc}", flush=True)
+        print(f"Attention backend: {self.attention_backend}", flush=True)
 
     def restore_model_dtypes(self) -> list[str]:
         restored: list[str] = []
@@ -1217,6 +1233,7 @@ def process_task(
                 "decode_chunk_size": args.decode_chunk_size,
                 "seed": args.seed,
                 "cpu_offload": args.cpu_offload,
+                "attention_backend": runner.attention_backend,
                 "crf": args.crf,
                 "pixel_format": "yuv420p",
                 "pytorch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""),

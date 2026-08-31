@@ -14,6 +14,35 @@ ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 NORMALCRAFTER_ROOT="$WORK_DIR/NormalCrafter"
 NORMALCRAFTER_COMMIT="75af9887a2cb14cd1ce3883c5773bc296565777c"
 PATCH="$SCRIPT_DIR/normalcrafter_long_video.patch"
+ENV_PROFILE="${DROID_NORMALS_ENV_PROFILE:-auto}"
+ATTENTION_BACKEND="${DROID_NORMALS_ATTENTION_BACKEND:-auto}"
+H100_TORCH_VERSION="${DROID_NORMALS_H100_TORCH_VERSION:-2.8.0}"
+H100_XFORMERS_VERSION="${DROID_NORMALS_H100_XFORMERS_VERSION:-0.0.32.post2}"
+H100_TORCH_INDEX_URL="${DROID_NORMALS_H100_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+
+if [[ "$ENV_PROFILE" == "auto" ]]; then
+  GPU_NAMES="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
+  if grep -Eiq 'H100|H200|B100|B200' <<<"$GPU_NAMES"; then
+    ENV_PROFILE="h100"
+  else
+    ENV_PROFILE="legacy"
+  fi
+fi
+if [[ "$ENV_PROFILE" != "legacy" && "$ENV_PROFILE" != "h100" ]]; then
+  echo "ERROR: DROID_NORMALS_ENV_PROFILE must be auto, legacy or h100." >&2
+  exit 2
+fi
+if [[ "$ATTENTION_BACKEND" == "auto" ]]; then
+  if [[ "$ENV_PROFILE" == "h100" ]]; then
+    ATTENTION_BACKEND="pytorch"
+  else
+    ATTENTION_BACKEND="xformers"
+  fi
+fi
+if [[ "$ATTENTION_BACKEND" != "pytorch" && "$ATTENTION_BACKEND" != "xformers" ]]; then
+  echo "ERROR: DROID_NORMALS_ATTENTION_BACKEND must be auto, pytorch or xformers." >&2
+  exit 2
+fi
 
 CONDA_BIN="${DROID_NORMALS_CONDA_BIN:-${DATA_PIPELINE_CONDA_BIN:-}}"
 if [[ -z "$CONDA_BIN" && -n "${MINIFORGE_HOME:-}" ]]; then
@@ -83,25 +112,52 @@ fi
 REQUIREMENTS="$NORMALCRAFTER_ROOT/requirements.txt"
 REQUIREMENTS_HASH="$(sha256sum "$REQUIREMENTS" | awk '{print $1}')"
 READY_MARKER="$WORK_DIR/.normalcrafter-environment-ready"
-INSTALLED_HASH="$(cat "$READY_MARKER" 2>/dev/null || true)"
-if [[ "$INSTALLED_HASH" != "$REQUIREMENTS_HASH" ]] \
-    || ! "$CONDA_BIN" run -n "$ENV_NAME" python -c \
-      'import torch, diffusers, transformers, accelerate, xformers, decord, cv2, hf_xet' \
-      >/dev/null 2>&1; then
+READY_VALUE="normalcrafter-env-v2 requirements=$REQUIREMENTS_HASH profile=$ENV_PROFILE attention=$ATTENTION_BACKEND"
+ENV_CHECK=(
+  "$CONDA_PREFIX/bin/python" "$SCRIPT_DIR/check_normal_environment.py"
+  --profile "$ENV_PROFILE" --attention-backend "$ATTENTION_BACKEND"
+)
+
+if "${ENV_CHECK[@]}" >/dev/null 2>&1; then
+  echo "Reusing the compatible $ENV_NAME environment."
+else
   "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install --upgrade pip setuptools wheel
-  "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install -r "$REQUIREMENTS"
+  if [[ "$ENV_PROFILE" == "h100" ]]; then
+    if ! "$CONDA_PREFIX/bin/python" "$SCRIPT_DIR/check_normal_environment.py" \
+        --profile h100 --attention-backend pytorch --torch-only >/dev/null 2>&1; then
+      "$CONDA_PREFIX/bin/python" -m pip uninstall -y \
+        torch triton xformers \
+        nvidia-cublas-cu11 nvidia-cuda-cupti-cu11 nvidia-cuda-nvrtc-cu11 \
+        nvidia-cuda-runtime-cu11 nvidia-cudnn-cu11 nvidia-cufft-cu11 \
+        nvidia-curand-cu11 nvidia-cusolver-cu11 nvidia-cusparse-cu11 \
+        nvidia-nccl-cu11 nvidia-nvtx-cu11 || true
+      "$CONDA_PREFIX/bin/python" -m pip install \
+        "torch==$H100_TORCH_VERSION" --index-url "$H100_TORCH_INDEX_URL"
+    fi
+    MODERN_REQUIREMENTS="$WORK_DIR/requirements-h100.txt"
+    grep -Eiv \
+      '^(torch|triton|xformers|nvidia-[A-Za-z0-9_-]+-cu11)([<=>[:space:]]|$)' \
+      "$REQUIREMENTS" > "$MODERN_REQUIREMENTS"
+    "$CONDA_PREFIX/bin/python" -m pip install -r "$MODERN_REQUIREMENTS"
+    if [[ "$ATTENTION_BACKEND" == "xformers" ]]; then
+      "$CONDA_PREFIX/bin/python" -m pip install "xformers==$H100_XFORMERS_VERSION"
+    fi
+  else
+    "$CONDA_PREFIX/bin/python" -m pip install -r "$REQUIREMENTS"
+  fi
   "$CONDA_BIN" run -n "$ENV_NAME" python -m pip install --upgrade hf_xet
 fi
 
-if ! "$CONDA_PREFIX/bin/python" -c \
-    'import torch, diffusers, transformers, accelerate, xformers, decord, cv2, hf_xet'; then
-  echo "ERROR: NormalCrafter dependencies are incomplete in $CONDA_PREFIX." >&2
+if ! "${ENV_CHECK[@]}"; then
+  echo "ERROR: NormalCrafter environment is incompatible: $CONDA_PREFIX" >&2
   exit 1
 fi
-printf '%s\n' "$REQUIREMENTS_HASH" > "$READY_MARKER"
+printf '%s\n' "$READY_VALUE" > "$READY_MARKER"
 
 mkdir -p "$WORK_DIR/hf_cache"
 echo "NormalCrafter environment ready."
 echo "  Conda environment: $ENV_NAME ($CONDA_PREFIX)"
+echo "  Environment:       $ENV_PROFILE"
+echo "  Attention:         $ATTENTION_BACKEND"
 echo "  Source:            $NORMALCRAFTER_ROOT"
 echo "  Checkpoint cache:  $WORK_DIR/hf_cache"
