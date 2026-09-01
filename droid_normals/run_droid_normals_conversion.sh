@@ -22,10 +22,11 @@ DRY_RUN="${DROID_NORMALS_DRY_RUN:-0}"
 VERBOSE_INFERENCE="${DROID_NORMALS_VERBOSE_INFERENCE:-0}"
 PREFETCH_NEXT_VIDEO="${DROID_NORMALS_PREFETCH_NEXT_VIDEO:-0}"
 VIDEO_DECODE_BATCH_SIZE="${DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE:-16}"
+MAX_VIDEOS_PER_PROCESS="${DROID_NORMALS_MAX_VIDEOS_PER_PROCESS:-1}"
 ATTENTION_BACKEND="${DROID_NORMALS_ATTENTION_BACKEND:-auto}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
-WORKER="$SCRIPT_DIR/annotate_normals_normalcrafter.py"
+WORKER="${DROID_NORMALS_WORKER:-$SCRIPT_DIR/annotate_normals_normalcrafter.py}"
 NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$RUNTIME_DIR/NormalCrafter}"
 HF_HOME="$RUNTIME_DIR/hf_cache"
 LOG_DIR="$RUN_DIR/logs"
@@ -50,6 +51,10 @@ if [[ "$CHECK_ONLY" != "0" && "$CHECK_ONLY" != "1" \
 fi
 if [[ ! "$VIDEO_DECODE_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
   echo "ERROR: DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE must be a positive integer." >&2
+  exit 2
+fi
+if [[ ! "$MAX_VIDEOS_PER_PROCESS" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: DROID_NORMALS_MAX_VIDEOS_PER_PROCESS must be a non-negative integer." >&2
   exit 2
 fi
 if [[ "$ATTENTION_BACKEND" == "auto" ]]; then
@@ -122,6 +127,10 @@ if [[ ! -f "$NORMALCRAFTER_ROOT/normalcrafter/normal_crafter_ppl.py" ]]; then
 fi
 if ! command -v setsid >/dev/null 2>&1; then
   echo "ERROR: setsid is required for reliable worker shutdown." >&2
+  exit 1
+fi
+if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
+  echo "ERROR: Bash 5.1 or newer is required for independent GPU worker supervision." >&2
   exit 1
 fi
 
@@ -277,7 +286,8 @@ echo "Episodes:         ${EPISODES:-<all episodes in selected chunks>}"
 echo "Physical GPUs:    ${GPU_ARRAY[*]}"
 echo "Global shards:    $GLOBAL_WORKERS (local offset $WORKER_OFFSET)"
 echo "Attempts/video:   $MAX_ATTEMPTS"
-echo "Process passes:   $WORKER_PASSES"
+echo "Restarts/GPU:     $WORKER_PASSES"
+echo "Videos/process:   $MAX_VIDEOS_PER_PROCESS (0 disables recycling)"
 echo "Shared runtime:   $RUNTIME_DIR"
 echo "Run logs:         $LOG_DIR"
 echo "Checkpoint cache: $HF_HOME"
@@ -296,14 +306,29 @@ if [[ "$PREFETCH_NEXT_VIDEO" == "1" ]]; then
   WORKER_MODE_ARGS+=(--prefetch-next-video)
 fi
 FINAL_FAILED=0
-for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
-  echo "Starting asynchronous GPU worker pass $PASS/$WORKER_PASSES."
-  PIDS=()
-  for LOCAL_INDEX in "${!GPU_ARRAY[@]}"; do
-    GPU_ID="${GPU_ARRAY[$LOCAL_INDEX]}"
-    SHARD_INDEX=$((WORKER_OFFSET + LOCAL_INDEX))
-    LOG_FILE="$LOG_DIR/${RUN_TAG}-pass${PASS}-gpu${GPU_ID}-shard${SHARD_INDEX}.log"
-    CUDA_VISIBLE_DEVICES="$GPU_ID" setsid "$PYTHON" "$WORKER" "$DATASET_DIR" \
+declare -A PID_TO_GPU=()
+declare -A PID_TO_SHARD=()
+declare -A PID_TO_ATTEMPT=()
+
+remove_active_pid() {
+  local finished_pid="$1"
+  local remaining=()
+  local pid
+  for pid in "${PIDS[@]}"; do
+    if [[ "$pid" != "$finished_pid" ]]; then
+      remaining+=("$pid")
+    fi
+  done
+  PIDS=("${remaining[@]}")
+}
+
+launch_worker() {
+  local gpu_id="$1"
+  local shard_index="$2"
+  local attempt="$3"
+  local log_file="$LOG_DIR/${RUN_TAG}-attempt${attempt}-gpu${gpu_id}-shard${shard_index}.log"
+  echo "Starting GPU $gpu_id shard $shard_index (process attempt $attempt/$WORKER_PASSES)."
+  CUDA_VISIBLE_DEVICES="$gpu_id" setsid "$PYTHON" "$WORKER" "$DATASET_DIR" \
         --normalcrafter-root "$NORMALCRAFTER_ROOT" \
         --unet-path "$UNET_PATH" \
         --unet-revision "$UNET_REVISION" \
@@ -314,7 +339,8 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
         "${SUBSET_ARGS[@]}" \
         "${EPISODE_ARGS[@]}" \
         --num-shards "$GLOBAL_WORKERS" \
-        --shard-index "$SHARD_INDEX" \
+        --shard-index "$shard_index" \
+        --max-videos-per-process "$MAX_VIDEOS_PER_PROCESS" \
         --max-attempts "$MAX_ATTEMPTS" \
         --retry-delay-seconds "${DROID_NORMALS_RETRY_DELAY_SECONDS:-5}" \
         --stale-lock-hours "${DROID_NORMALS_STALE_LOCK_HOURS:-0.25}" \
@@ -328,31 +354,57 @@ for (( PASS=1; PASS<=WORKER_PASSES; PASS++ )); do
         --ffmpeg-preset "${DROID_NORMALS_FFMPEG_PRESET:-veryfast}" \
         --continue-on-error \
         "${WORKER_MODE_ARGS[@]}" \
-        > >(tee "$LOG_FILE") 2>&1 &
-    PIDS+=("$!")
-  done
+        > >(tee "$log_file") 2>&1 &
+  local pid="$!"
+  PIDS+=("$pid")
+  PID_TO_GPU["$pid"]="$gpu_id"
+  PID_TO_SHARD["$pid"]="$shard_index"
+  PID_TO_ATTEMPT["$pid"]="$attempt"
+}
 
-  PASS_FAILED=0
-  for PID_INDEX in "${!PIDS[@]}"; do
-    PID="${PIDS[$PID_INDEX]}"
-    if ! wait "$PID"; then
-      PASS_FAILED=1
-    fi
-    unset "PIDS[$PID_INDEX]"
-  done
-  PIDS=()
-  if [[ "$PASS_FAILED" -eq 0 ]]; then
-    FINAL_FAILED=0
+PIDS=()
+for LOCAL_INDEX in "${!GPU_ARRAY[@]}"; do
+  GPU_ID="${GPU_ARRAY[$LOCAL_INDEX]}"
+  SHARD_INDEX=$((WORKER_OFFSET + LOCAL_INDEX))
+  launch_worker "$GPU_ID" "$SHARD_INDEX" 1
+done
+
+while (( ${#PIDS[@]} > 0 )); do
+  FINISHED_PID=""
+  if wait -n -p FINISHED_PID "${PIDS[@]}"; then
+    STATUS=0
+  else
+    STATUS=$?
+  fi
+  if [[ -z "$FINISHED_PID" || -z "${PID_TO_GPU[$FINISHED_PID]:-}" ]]; then
+    echo "ERROR: could not identify a completed GPU worker." >&2
+    FINAL_FAILED=1
     break
   fi
-  FINAL_FAILED=1
-  if (( PASS < WORKER_PASSES )); then
-    echo "One or more workers failed; completed outputs will be skipped on the next pass." >&2
+
+  GPU_ID="${PID_TO_GPU[$FINISHED_PID]}"
+  SHARD_INDEX="${PID_TO_SHARD[$FINISHED_PID]}"
+  ATTEMPT="${PID_TO_ATTEMPT[$FINISHED_PID]}"
+  remove_active_pid "$FINISHED_PID"
+  unset 'PID_TO_GPU[$FINISHED_PID]' 'PID_TO_SHARD[$FINISHED_PID]' 'PID_TO_ATTEMPT[$FINISHED_PID]'
+
+  if [[ "$STATUS" -eq 0 ]]; then
+    echo "GPU $GPU_ID shard $SHARD_INDEX complete."
+    continue
+  fi
+
+  echo "WARNING: GPU $GPU_ID shard $SHARD_INDEX worker exited with status $STATUS." >&2
+  if (( ATTEMPT < WORKER_PASSES )); then
+    echo "Restarting only GPU $GPU_ID; completed outputs will be skipped." >&2
+    launch_worker "$GPU_ID" "$SHARD_INDEX" $((ATTEMPT + 1))
+  else
+    echo "ERROR: GPU $GPU_ID shard $SHARD_INDEX exhausted $WORKER_PASSES process attempts." >&2
+    FINAL_FAILED=1
   fi
 done
 
 if [[ "$FINAL_FAILED" -ne 0 ]]; then
-  echo "ERROR: pending videos still failed after $WORKER_PASSES process pass(es)." >&2
+  echo "ERROR: one or more GPU shards still have pending videos." >&2
   echo "Logs: $LOG_DIR" >&2
   exit 1
 fi

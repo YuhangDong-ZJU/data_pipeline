@@ -228,6 +228,62 @@ class ResumeSchedulerTest(unittest.TestCase):
             self.assertEqual(pending_count, 3)
             self.assertEqual([task.episode for task in selected], [tasks[2].episode, tasks[4].episode])
 
+    def test_process_limit_bounds_one_native_worker_lifetime(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tasks = [self.make_task(root, index) for index in range(5)]
+            args = SimpleNamespace(
+                overwrite=False,
+                num_shards=1,
+                shard_index=0,
+                limit=None,
+                max_videos_per_process=1,
+            )
+
+            selected, pending_count = worker.select_worker_tasks(tasks, args)
+
+            self.assertEqual(pending_count, 5)
+            self.assertEqual([task.episode for task in selected], [tasks[0].episode])
+            self.assertEqual(worker.assigned_pending_tasks(tasks, args), tasks)
+
+    def test_completed_outputs_advance_the_next_recycled_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tasks = [self.make_task(root, index) for index in range(3)]
+            args = SimpleNamespace(
+                overwrite=False,
+                num_shards=1,
+                shard_index=0,
+                limit=None,
+                max_videos_per_process=1,
+            )
+            self.mark_complete(tasks[0])
+
+            selected, _ = worker.select_worker_tasks(tasks, args)
+
+            self.assertEqual([task.episode for task in selected], [tasks[1].episode])
+            self.assertEqual(
+                [task.episode for task in worker.assigned_pending_tasks(tasks, args)],
+                [tasks[1].episode, tasks[2].episode],
+            )
+
+    def test_dry_run_shows_the_full_shard_despite_process_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tasks = [self.make_task(root, index) for index in range(3)]
+            args = SimpleNamespace(
+                overwrite=False,
+                num_shards=1,
+                shard_index=0,
+                limit=None,
+                max_videos_per_process=1,
+                dry_run=True,
+            )
+
+            selected, _ = worker.select_worker_tasks(tasks, args)
+
+            self.assertEqual(selected, tasks)
+
     def test_different_resume_views_do_not_shift_shard_ownership(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

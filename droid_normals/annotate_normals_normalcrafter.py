@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import faulthandler
 import gc
 import hashlib
 import json
@@ -12,6 +13,7 @@ import os
 import queue
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -65,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Generate observation.images.normal_* MP4s from LeRobot RGB videos "
-            "with one persistent NormalCrafter model."
+            "with bounded-lifetime NormalCrafter worker processes."
         )
     )
     parser.add_argument("dataset_root", type=Path)
@@ -116,6 +118,15 @@ def parse_args() -> argparse.Namespace:
         help="Zero-based global shard assigned to this GPU worker",
     )
     parser.add_argument("--limit", type=int, help="Process at most this many selected videos")
+    parser.add_argument(
+        "--max-videos-per-process",
+        type=int,
+        default=0,
+        help=(
+            "Re-exec the worker after this many successful video attempts so native "
+            "Decord/CUDA state cannot accumulate; 0 keeps one persistent process"
+        ),
+    )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--print-limit", type=int, default=50)
@@ -204,6 +215,13 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--shard-index must satisfy 0 <= index < num_shards")
     if args.limit is not None and args.limit < 1:
         raise ValueError("--limit must be positive")
+    if args.max_videos_per_process < 0:
+        raise ValueError("--max-videos-per-process cannot be negative")
+    if args.overwrite and args.max_videos_per_process:
+        raise ValueError(
+            "--overwrite cannot be combined with --max-videos-per-process; "
+            "use --max-videos-per-process 0 for an overwrite run"
+        )
     if args.episode_start is not None and args.episode_start < 0:
         raise ValueError("--episode-start must be non-negative")
     if args.episode_end is not None and args.episode_end < 0:
@@ -591,7 +609,24 @@ def select_worker_tasks(
     ]
     if args.limit is not None:
         worker_tasks = worker_tasks[: args.limit]
+    process_limit = getattr(args, "max_videos_per_process", 0)
+    if process_limit and not getattr(args, "dry_run", False):
+        worker_tasks = worker_tasks[:process_limit]
     return worker_tasks, pending_count
+
+
+def assigned_pending_tasks(
+    discovered: list[NormalTask],
+    args: argparse.Namespace,
+    expected_config: dict[str, Any] | None = None,
+) -> list[NormalTask]:
+    """Return this stable shard's unfinished tasks without a per-process limit."""
+    return [
+        task
+        for index, task in enumerate(discovered)
+        if index % args.num_shards == args.shard_index
+        and (args.overwrite or not task_is_complete(task, expected_config))
+    ]
 
 
 def probe_video(path: Path) -> VideoInfo:
@@ -1278,9 +1313,12 @@ def process_task(
             crf=args.crf,
             preset=args.ffmpeg_preset,
         )
+        print(f"STAGE: inference | {task.episode} | {task.input_camera}", flush=True)
         inference = runner.infer(frames, writer, args)
+        print(f"STAGE: encode-finalize | {task.episode} | {task.input_camera}", flush=True)
         writer.finish()
         writer = None
+        print(f"STAGE: validate-output | {task.episode} | {task.output_camera}", flush=True)
         output_info = probe_video(task.output_path)
         output_video = {
             **vars(output_info),
@@ -1378,6 +1416,10 @@ def print_plan(
 
 
 def main() -> None:
+    try:
+        faulthandler.enable(all_threads=True)
+    except (AttributeError, OSError, RuntimeError):
+        pass
     args = parse_args()
     validate_args(args)
 
@@ -1387,10 +1429,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, handle_sigterm)
     if not args.dry_run:
         for executable in ("ffmpeg", "ffprobe"):
-            if not any(
-                (Path(directory) / executable).is_file()
-                for directory in os.environ.get("PATH", "").split(os.pathsep)
-            ):
+            if shutil.which(executable) is None:
                 raise RuntimeError(f"{executable} is required but was not found in PATH")
 
     expected_config = annotation_config(args)
@@ -1441,11 +1480,23 @@ def main() -> None:
                 try:
                     if attempt == 1:
                         if current_future is None:
+                            print(
+                                f"STAGE: decode | {task.episode} | {task.input_camera}",
+                                flush=True,
+                            )
                             frames, fps = runner.load_video(task, args)
                         else:
                             frames, fps = current_future.result()
                     else:
+                        print(
+                            f"STAGE: decode-retry | {task.episode} | {task.input_camera}",
+                            flush=True,
+                        )
                         frames, fps = runner.load_video(task, args)
+                    print(
+                        f"STAGE: decoded | {task.episode} | {len(frames)} frames",
+                        flush=True,
+                    )
                     result = process_task(
                         runner,
                         task,
@@ -1503,12 +1554,34 @@ def main() -> None:
             pool.shutdown(wait=True, cancel_futures=True)
 
     remaining = [task for task in tasks if not task_is_complete(task, expected_config)]
+    remaining_on_shard = assigned_pending_tasks(discovered, args, expected_config)
     print(
         "NormalCrafter complete: "
         f"{succeeded} succeeded, {skipped} skipped, {locked} locked, {failed} failed, "
-        f"{len(remaining)} still pending",
+        f"{len(remaining_on_shard)} still pending on this shard",
         flush=True,
     )
+    if (
+        args.max_videos_per_process
+        and args.limit is None
+        and not failed
+        and not locked
+        and not remaining
+        and remaining_on_shard
+    ):
+        generation = int(os.environ.get("DROID_NORMALS_PROCESS_GENERATION", "0")) + 1
+        os.environ["DROID_NORMALS_PROCESS_GENERATION"] = str(generation)
+        print(
+            "RECYCLE: completed the bounded process batch; replacing the worker "
+            f"before {len(remaining_on_shard)} remaining video(s) (generation {generation}).",
+            flush=True,
+        )
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(
+            sys.executable,
+            [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]],
+        )
     if remaining:
         for task in remaining[: args.print_limit]:
             print(f"PENDING: {task.output_path}", file=sys.stderr, flush=True)
