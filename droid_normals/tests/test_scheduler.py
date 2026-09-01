@@ -267,6 +267,29 @@ class ResumeSchedulerTest(unittest.TestCase):
                 [tasks[1].episode, tasks[2].episode],
             )
 
+    def test_quarantined_task_does_not_block_later_pending_work(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tasks = [self.make_task(root, index) for index in range(3)]
+            quarantined_key = worker.recovery_task_key(worker.recovery_identity(tasks[0]))
+            args = SimpleNamespace(
+                overwrite=False,
+                num_shards=1,
+                shard_index=0,
+                limit=None,
+                max_videos_per_process=1,
+                quarantined_task_keys={quarantined_key},
+            )
+
+            selected, pending_count = worker.select_worker_tasks(tasks, args)
+
+            self.assertEqual(pending_count, 3)
+            self.assertEqual([task.episode for task in selected], [tasks[1].episode])
+            self.assertEqual(
+                [task.episode for task in worker.assigned_pending_tasks(tasks, args)],
+                [tasks[1].episode, tasks[2].episode],
+            )
+
     def test_dry_run_shows_the_full_shard_despite_process_limit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

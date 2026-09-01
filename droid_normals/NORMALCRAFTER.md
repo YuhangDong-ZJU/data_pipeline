@@ -89,19 +89,28 @@ runs real Torch (and, when requested, xFormers) CUDA kernels, so a wheel that
 merely imports but lacks the H100 architecture is rejected before model
 download or multi-GPU worker startup.
 
-`convert` starts one background process per selected physical GPU. Each process
-loads one persistent model and owns a stable shard of the full discovered task
-list. Completed outputs are filtered only after sharding, so machines that start
+`convert` starts one supervised worker per selected physical GPU. Each worker
+owns a stable shard of the full discovered task list. Completed outputs are
+filtered only after sharding, so machines that start
 at different times keep the same ownership. On the first run, a
 single-GPU preflight populates and validates the shared checkpoint cache before
 the workers start, avoiding concurrent first-download races. A restart first
 filters outputs having both an atomically published MP4 and an atomically
-published `status=complete` JSON, then redistributes only unfinished videos over
-the available workers. Each video is attempted three times by default; if a
-worker process still exits nonzero, the launcher performs a second resumable
-worker pass. A worker returns nonzero when locked or failed outputs remain after
-its pass, rather than reporting a partial run as complete. Logs are written per pass and GPU below
-`Res/experiments/<exp_name>/logs`.
+published `status=complete` JSON. Each video is attempted three times by default.
+The worker also writes an active-task marker before decode/inference/encoding.
+If native code terminates the process, the supervisor retries that exact
+episode-camera task up to three process launches. A third native crash, or three
+caught Python failures, creates a persistent quarantine record and the GPU moves
+on to its next pending task. Other GPUs are never restarted. The final command
+returns nonzero when quarantined videos remain, so a partial dataset cannot be
+reported as complete. Logs are written per launch and GPU below
+`Res/experiments/<exp_name>/logs`; crash counters and quarantine records are
+below its `recovery/` directory.
+
+By default the worker replaces its process after every completed video. This
+reloads the model but prevents Decord, FFmpeg and CUDA native state from
+accumulating across a long shard. Completed MP4/JSON pairs and quarantined tasks
+are skipped when the replacement process scans the shard again.
 Each attempt restores the model's FP16 invariant. CUDA cache is released after
 failed attempts or dtype recovery, while successful attempts reuse allocator
 blocks for better throughput. The launcher defaults to
@@ -148,6 +157,8 @@ export DROID_NORMALS_GLOBAL_WORKER_OFFSET=0
 
 If machines receive disjoint chunks, no global settings are necessary. Useful
 runtime overrides include `DROID_NORMALS_WORKER_PASSES`,
+`DROID_NORMALS_NATIVE_CRASH_MAX_ATTEMPTS`,
+`DROID_NORMALS_MAX_VIDEOS_PER_PROCESS`,
 `DROID_NORMALS_RETRY_DELAY_SECONDS`, `DROID_NORMALS_MAX_RES`,
 `DROID_NORMALS_CRF`, `DROID_NORMALS_CPU_OFFLOAD`, `DROID_NORMALS_SUBSETS`, and
 `DROID_NORMALS_DATASET_PREFIX`. Environment overrides include
@@ -179,9 +190,8 @@ and unsupported filesystems only produce one warning per worker.
 
 These are operational settings and do not change the annotation fingerprint, so
 existing valid MP4/JSON outputs remain resumable. Override the temporary decode
-batch with `DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE`. Machines with sufficient
-unconstrained host RAM may opt back into decode/inference overlap with
-`DROID_NORMALS_PREFETCH_NEXT_VIDEO=1`. The launcher also defaults
+batch with `DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE`. Complete next-video prefetch
+is intentionally incompatible with active-task crash attribution. The launcher also defaults
 `MALLOC_ARENA_MAX=2` to reduce retained glibc heap pages across decoder and
 encoder threads.
 

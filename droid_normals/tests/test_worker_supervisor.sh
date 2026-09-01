@@ -19,36 +19,36 @@ exit 0
 SH
 chmod +x "$TEST_ROOT/bin/nvidia-smi"
 
-cat > "$TEST_ROOT/fake_worker.sh" <<'SH'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-state_dir="${DROID_NORMALS_TEST_STATE:?}"
-gpu="${CUDA_VISIBLE_DEVICES:?}"
-counter="$state_dir/gpu-$gpu.count"
-attempt=1
-if [[ -f "$counter" ]]; then
-  attempt=$(( $(<"$counter") + 1 ))
-fi
-printf '%s\n' "$attempt" > "$counter"
-printf 'gpu%s-attempt%s-start\n' "$gpu" "$attempt" >> "$state_dir/events"
+cat > "$TEST_ROOT/fake_worker.py" <<'PY'
+import os
+import sys
+import time
+from pathlib import Path
 
-if [[ "$gpu" == "0" && "$attempt" == "1" ]]; then
-  sleep 0.2
-  printf 'gpu0-attempt1-fail\n' >> "$state_dir/events"
-  exit 139
-fi
-if [[ "$gpu" == "1" ]]; then
-  sleep 2
-fi
-printf 'gpu%s-attempt%s-done\n' "$gpu" "$attempt" >> "$state_dir/events"
-SH
-chmod +x "$TEST_ROOT/fake_worker.sh"
+state_dir = Path(os.environ["DROID_NORMALS_TEST_STATE"])
+gpu = os.environ["CUDA_VISIBLE_DEVICES"]
+counter = state_dir / f"gpu-{gpu}.count"
+attempt = int(counter.read_text()) + 1 if counter.exists() else 1
+counter.write_text(f"{attempt}\n")
+with (state_dir / "events").open("a") as events:
+    events.write(f"gpu{gpu}-attempt{attempt}-start\n")
+
+if gpu == "0" and attempt == 1:
+    time.sleep(0.2)
+    with (state_dir / "events").open("a") as events:
+        events.write("gpu0-attempt1-fail\n")
+    raise SystemExit(139)
+if gpu == "1":
+    time.sleep(2)
+with (state_dir / "events").open("a") as events:
+    events.write(f"gpu{gpu}-attempt{attempt}-done\n")
+PY
 
 export PATH="$TEST_ROOT/bin:$PATH"
 export DROID_NORMALS_TEST_STATE="$TEST_ROOT"
 export DROID_NORMALS_SKIP_INSTALL=1
-export NORMALCRAFTER_PYTHON=/bin/bash
-export DROID_NORMALS_WORKER="$TEST_ROOT/fake_worker.sh"
+export NORMALCRAFTER_PYTHON="$(command -v python3)"
+export DROID_NORMALS_WORKER="$TEST_ROOT/fake_worker.py"
 export DROID_NORMALS_ATTENTION_BACKEND=pytorch
 export DROID_NORMALS_DRY_RUN=1
 export DROID_NORMALS_WORKER_PASSES=2

@@ -23,10 +23,12 @@ VERBOSE_INFERENCE="${DROID_NORMALS_VERBOSE_INFERENCE:-0}"
 PREFETCH_NEXT_VIDEO="${DROID_NORMALS_PREFETCH_NEXT_VIDEO:-0}"
 VIDEO_DECODE_BATCH_SIZE="${DROID_NORMALS_VIDEO_DECODE_BATCH_SIZE:-16}"
 MAX_VIDEOS_PER_PROCESS="${DROID_NORMALS_MAX_VIDEOS_PER_PROCESS:-1}"
+NATIVE_CRASH_MAX_ATTEMPTS="${DROID_NORMALS_NATIVE_CRASH_MAX_ATTEMPTS:-3}"
 ATTENTION_BACKEND="${DROID_NORMALS_ATTENTION_BACKEND:-auto}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="${DROID_NORMALS_ENV_NAME:-droid_normals}"
 WORKER="${DROID_NORMALS_WORKER:-$SCRIPT_DIR/annotate_normals_normalcrafter.py}"
+RECOVERY_HELPER="$SCRIPT_DIR/normal_task_recovery.py"
 NORMALCRAFTER_ROOT="${NORMALCRAFTER_ROOT:-$RUNTIME_DIR/NormalCrafter}"
 HF_HOME="$RUNTIME_DIR/hf_cache"
 LOG_DIR="$RUN_DIR/logs"
@@ -55,6 +57,10 @@ if [[ ! "$VIDEO_DECODE_BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
 fi
 if [[ ! "$MAX_VIDEOS_PER_PROCESS" =~ ^[0-9]+$ ]]; then
   echo "ERROR: DROID_NORMALS_MAX_VIDEOS_PER_PROCESS must be a non-negative integer." >&2
+  exit 2
+fi
+if [[ ! "$NATIVE_CRASH_MAX_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "ERROR: DROID_NORMALS_NATIVE_CRASH_MAX_ATTEMPTS must be a positive integer." >&2
   exit 2
 fi
 if [[ "$ATTENTION_BACKEND" == "auto" ]]; then
@@ -127,6 +133,10 @@ if [[ ! -f "$NORMALCRAFTER_ROOT/normalcrafter/normal_crafter_ppl.py" ]]; then
 fi
 if ! command -v setsid >/dev/null 2>&1; then
   echo "ERROR: setsid is required for reliable worker shutdown." >&2
+  exit 1
+fi
+if [[ ! -f "$RECOVERY_HELPER" ]]; then
+  echo "ERROR: recovery helper is missing: $RECOVERY_HELPER" >&2
   exit 1
 fi
 if (( BASH_VERSINFO[0] < 5 || (BASH_VERSINFO[0] == 5 && BASH_VERSINFO[1] < 1) )); then
@@ -286,7 +296,8 @@ echo "Episodes:         ${EPISODES:-<all episodes in selected chunks>}"
 echo "Physical GPUs:    ${GPU_ARRAY[*]}"
 echo "Global shards:    $GLOBAL_WORKERS (local offset $WORKER_OFFSET)"
 echo "Attempts/video:   $MAX_ATTEMPTS"
-echo "Restarts/GPU:     $WORKER_PASSES"
+echo "Untracked starts: $WORKER_PASSES per GPU"
+echo "Native retries:   $NATIVE_CRASH_MAX_ATTEMPTS per video"
 echo "Videos/process:   $MAX_VIDEOS_PER_PROCESS (0 disables recycling)"
 echo "Shared runtime:   $RUNTIME_DIR"
 echo "Run logs:         $LOG_DIR"
@@ -294,6 +305,19 @@ echo "Checkpoint cache: $HF_HOME"
 echo "CUDA allocator:   $PYTORCH_CUDA_ALLOC_CONF"
 echo "glibc arenas:      $MALLOC_ARENA_MAX"
 echo "Attention:        $ATTENTION_BACKEND"
+
+RECOVERY_SCOPE="$(
+  "$PYTHON" -c \
+    'import hashlib, sys; print(hashlib.sha256("\0".join(sys.argv[1:]).encode()).hexdigest()[:16])' \
+    "$DATASET_DIR" "$CHUNKS" "$CAMERAS" "$SUBSETS" "$EPISODES" \
+    "$UNET_REVISION" "$PRETRAIN_REVISION" \
+    "${DROID_NORMALS_MAX_RES:-1024}" \
+    "${DROID_NORMALS_OUTPUT_WIDTH:-1280}" \
+    "${DROID_NORMALS_OUTPUT_HEIGHT:-720}"
+)"
+RECOVERY_STATE_DIR="${DROID_NORMALS_RECOVERY_STATE_DIR:-$RUN_DIR/recovery/$RECOVERY_SCOPE}"
+mkdir -p "$RECOVERY_STATE_DIR/active"
+echo "Recovery state:   $RECOVERY_STATE_DIR"
 
 RUN_TAG="$(date +%Y%m%d-%H%M%S)-chunks-${CHUNKS//,/_}"
 WORKER_MODE_ARGS=()
@@ -308,7 +332,8 @@ fi
 FINAL_FAILED=0
 declare -A PID_TO_GPU=()
 declare -A PID_TO_SHARD=()
-declare -A PID_TO_ATTEMPT=()
+declare -A PID_TO_LAUNCH=()
+declare -A PID_TO_UNTRACKED_FAILURES=()
 
 remove_active_pid() {
   local finished_pid="$1"
@@ -325,9 +350,11 @@ remove_active_pid() {
 launch_worker() {
   local gpu_id="$1"
   local shard_index="$2"
-  local attempt="$3"
-  local log_file="$LOG_DIR/${RUN_TAG}-attempt${attempt}-gpu${gpu_id}-shard${shard_index}.log"
-  echo "Starting GPU $gpu_id shard $shard_index (process attempt $attempt/$WORKER_PASSES)."
+  local launch_index="$3"
+  local untracked_failures="$4"
+  local active_file="$RECOVERY_STATE_DIR/active/shard-${shard_index}.json"
+  local log_file="$LOG_DIR/${RUN_TAG}-launch${launch_index}-gpu${gpu_id}-shard${shard_index}.log"
+  echo "Starting GPU $gpu_id shard $shard_index (launch $launch_index)."
   CUDA_VISIBLE_DEVICES="$gpu_id" setsid "$PYTHON" "$WORKER" "$DATASET_DIR" \
         --normalcrafter-root "$NORMALCRAFTER_ROOT" \
         --unet-path "$UNET_PATH" \
@@ -341,6 +368,8 @@ launch_worker() {
         --num-shards "$GLOBAL_WORKERS" \
         --shard-index "$shard_index" \
         --max-videos-per-process "$MAX_VIDEOS_PER_PROCESS" \
+        --recovery-state-dir "$RECOVERY_STATE_DIR" \
+        --active-task-file "$active_file" \
         --max-attempts "$MAX_ATTEMPTS" \
         --retry-delay-seconds "${DROID_NORMALS_RETRY_DELAY_SECONDS:-5}" \
         --stale-lock-hours "${DROID_NORMALS_STALE_LOCK_HOURS:-0.25}" \
@@ -359,14 +388,15 @@ launch_worker() {
   PIDS+=("$pid")
   PID_TO_GPU["$pid"]="$gpu_id"
   PID_TO_SHARD["$pid"]="$shard_index"
-  PID_TO_ATTEMPT["$pid"]="$attempt"
+  PID_TO_LAUNCH["$pid"]="$launch_index"
+  PID_TO_UNTRACKED_FAILURES["$pid"]="$untracked_failures"
 }
 
 PIDS=()
 for LOCAL_INDEX in "${!GPU_ARRAY[@]}"; do
   GPU_ID="${GPU_ARRAY[$LOCAL_INDEX]}"
   SHARD_INDEX=$((WORKER_OFFSET + LOCAL_INDEX))
-  launch_worker "$GPU_ID" "$SHARD_INDEX" 1
+  launch_worker "$GPU_ID" "$SHARD_INDEX" 1 0
 done
 
 while (( ${#PIDS[@]} > 0 )); do
@@ -384,9 +414,11 @@ while (( ${#PIDS[@]} > 0 )); do
 
   GPU_ID="${PID_TO_GPU[$FINISHED_PID]}"
   SHARD_INDEX="${PID_TO_SHARD[$FINISHED_PID]}"
-  ATTEMPT="${PID_TO_ATTEMPT[$FINISHED_PID]}"
+  LAUNCH_INDEX="${PID_TO_LAUNCH[$FINISHED_PID]}"
+  UNTRACKED_FAILURES="${PID_TO_UNTRACKED_FAILURES[$FINISHED_PID]}"
   remove_active_pid "$FINISHED_PID"
-  unset 'PID_TO_GPU[$FINISHED_PID]' 'PID_TO_SHARD[$FINISHED_PID]' 'PID_TO_ATTEMPT[$FINISHED_PID]'
+  unset 'PID_TO_GPU[$FINISHED_PID]' 'PID_TO_SHARD[$FINISHED_PID]' \
+    'PID_TO_LAUNCH[$FINISHED_PID]' 'PID_TO_UNTRACKED_FAILURES[$FINISHED_PID]'
 
   if [[ "$STATUS" -eq 0 ]]; then
     echo "GPU $GPU_ID shard $SHARD_INDEX complete."
@@ -394,14 +426,38 @@ while (( ${#PIDS[@]} > 0 )); do
   fi
 
   echo "WARNING: GPU $GPU_ID shard $SHARD_INDEX worker exited with status $STATUS." >&2
-  if (( ATTEMPT < WORKER_PASSES )); then
-    echo "Restarting only GPU $GPU_ID; completed outputs will be skipped." >&2
-    launch_worker "$GPU_ID" "$SHARD_INDEX" $((ATTEMPT + 1))
+  ACTIVE_FILE="$RECOVERY_STATE_DIR/active/shard-${SHARD_INDEX}.json"
+  RECOVERY_OUTPUT=""
+  if RECOVERY_OUTPUT="$(
+    "$PYTHON" "$RECOVERY_HELPER" record-crash \
+      --state-dir "$RECOVERY_STATE_DIR" \
+      --active-file "$ACTIVE_FILE" \
+      --max-attempts "$NATIVE_CRASH_MAX_ATTEMPTS" \
+      --exit-status "$STATUS" \
+      --gpu-id "$GPU_ID" \
+      --shard-index "$SHARD_INDEX" \
+      --worker-pid "$FINISHED_PID"
+  )"; then
+    echo "$RECOVERY_OUTPUT" >&2
+    echo "Restarting only GPU $GPU_ID; completed and quarantined outputs will be skipped." >&2
+    launch_worker "$GPU_ID" "$SHARD_INDEX" $((LAUNCH_INDEX + 1)) "$UNTRACKED_FAILURES"
   else
-    echo "ERROR: GPU $GPU_ID shard $SHARD_INDEX exhausted $WORKER_PASSES process attempts." >&2
-    FINAL_FAILED=1
+    echo "$RECOVERY_OUTPUT" >&2
+    NEXT_UNTRACKED_FAILURES=$((UNTRACKED_FAILURES + 1))
+    if (( NEXT_UNTRACKED_FAILURES < WORKER_PASSES )); then
+      echo "Restarting GPU $GPU_ID after an untracked worker failure." >&2
+      launch_worker \
+        "$GPU_ID" "$SHARD_INDEX" $((LAUNCH_INDEX + 1)) "$NEXT_UNTRACKED_FAILURES"
+    else
+      echo "ERROR: GPU $GPU_ID shard $SHARD_INDEX exhausted $WORKER_PASSES untracked starts." >&2
+      FINAL_FAILED=1
+    fi
   fi
 done
+
+if ! "$PYTHON" "$RECOVERY_HELPER" summary --state-dir "$RECOVERY_STATE_DIR"; then
+  FINAL_FAILED=1
+fi
 
 if [[ "$FINAL_FAILED" -ne 0 ]]; then
   echo "ERROR: one or more GPU shards still have pending videos." >&2

@@ -29,6 +29,15 @@ from typing import Any
 
 import numpy as np
 
+from normal_task_recovery import (
+    clear_active_task,
+    load_quarantined_keys,
+    mark_resolved,
+    quarantine_python_failure,
+    task_key as recovery_task_key,
+    write_active_task,
+)
+
 
 _STOP = object()
 _ABORT = object()
@@ -61,6 +70,19 @@ class VideoInfo:
     height: int
     frames: int
     fps: str
+
+
+def recovery_identity(task: NormalTask) -> dict[str, str]:
+    return {
+        "subset": task.subset_relative.as_posix(),
+        "chunk": task.chunk,
+        "input_camera": task.input_camera,
+        "output_camera": task.output_camera,
+        "episode": task.episode,
+        "input_path": str(task.input_path),
+        "output_path": str(task.output_path),
+        "metadata_path": str(task.metadata_path),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -126,6 +148,16 @@ def parse_args() -> argparse.Namespace:
             "Re-exec the worker after this many successful video attempts so native "
             "Decord/CUDA state cannot accumulate; 0 keeps one persistent process"
         ),
+    )
+    parser.add_argument(
+        "--recovery-state-dir",
+        type=Path,
+        help="Persistent per-run crash counters and quarantined-task records",
+    )
+    parser.add_argument(
+        "--active-task-file",
+        type=Path,
+        help="Supervisor marker for the task currently executing in this process",
     )
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -221,6 +253,14 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "--overwrite cannot be combined with --max-videos-per-process; "
             "use --max-videos-per-process 0 for an overwrite run"
+        )
+    if (args.recovery_state_dir is None) != (args.active_task_file is None):
+        raise ValueError(
+            "--recovery-state-dir and --active-task-file must be provided together"
+        )
+    if args.prefetch_next_video and args.active_task_file is not None:
+        raise ValueError(
+            "--prefetch-next-video cannot be combined with process-crash task tracking"
         )
     if args.episode_start is not None and args.episode_start < 0:
         raise ValueError("--episode-start must be non-negative")
@@ -586,6 +626,11 @@ def task_is_complete(task: NormalTask, expected_config: dict[str, Any] | None = 
         return False
 
 
+def task_is_quarantined(task: NormalTask, args: argparse.Namespace) -> bool:
+    keys = getattr(args, "quarantined_task_keys", set())
+    return recovery_task_key(recovery_identity(task)) in keys
+
+
 def select_worker_tasks(
     discovered: list[NormalTask],
     args: argparse.Namespace,
@@ -605,7 +650,8 @@ def select_worker_tasks(
     worker_tasks = [
         task
         for task in assigned
-        if args.overwrite or not task_is_complete(task, expected_config)
+        if (args.overwrite or not task_is_complete(task, expected_config))
+        and not task_is_quarantined(task, args)
     ]
     if args.limit is not None:
         worker_tasks = worker_tasks[: args.limit]
@@ -626,6 +672,7 @@ def assigned_pending_tasks(
         for index, task in enumerate(discovered)
         if index % args.num_shards == args.shard_index
         and (args.overwrite or not task_is_complete(task, expected_config))
+        and not task_is_quarantined(task, args)
     ]
 
 
@@ -1404,6 +1451,7 @@ def print_plan(
     print(f"  Discovered:       {discovered_count}")
     print(f"  Pending globally: {pending_count}")
     print(f"  Pending on shard: {len(tasks)}")
+    print(f"  Quarantined:      {len(getattr(args, 'quarantined_task_keys', set()))}")
     print(f"  Model max side:   {args.max_res}")
     print(f"  Output:           {args.output_width}x{args.output_height} H.264 CRF {args.crf}")
     print(f"  RGB decode batch: {args.video_decode_batch_size} frame(s)")
@@ -1434,12 +1482,27 @@ def main() -> None:
 
     expected_config = annotation_config(args)
     discovered = discover_tasks(args)
+    args.quarantined_task_keys = load_quarantined_keys(args.recovery_state_dir)
+    if args.recovery_state_dir is not None:
+        for task in discovered:
+            key = recovery_task_key(recovery_identity(task))
+            if key in args.quarantined_task_keys and task_is_complete(task, expected_config):
+                mark_resolved(args.recovery_state_dir, key)
+                args.quarantined_task_keys.remove(key)
+    if args.active_task_file is not None and not args.dry_run:
+        # A marker left by a manually interrupted older invocation must not be
+        # charged to a future process. The live supervisor records real crashes
+        # before it starts the replacement process.
+        clear_active_task(args.active_task_file)
     tasks, pending_count = select_worker_tasks(discovered, args, expected_config)
     print_plan(tasks, args, len(discovered), pending_count)
     if args.dry_run:
         return
     if not tasks:
-        print("All selected normal videos already exist.", flush=True)
+        if args.quarantined_task_keys:
+            print("No actionable videos remain; quarantined videos are reported by the supervisor.", flush=True)
+        else:
+            print("All selected normal videos already exist.", flush=True)
         return
 
     import torch
@@ -1477,6 +1540,12 @@ def main() -> None:
                 frames: list[Any] | None = None
                 attempt_failed = False
                 retrying = False
+                active_key: str | None = None
+                if args.active_task_file is not None:
+                    active_key = write_active_task(
+                        args.active_task_file,
+                        recovery_identity(task),
+                    )
                 try:
                     if attempt == 1:
                         if current_future is None:
@@ -1531,12 +1600,27 @@ def main() -> None:
                             f"RECOVERED model dtype after attempt: {','.join(restored)}",
                             flush=True,
                         )
+                    if args.active_task_file is not None:
+                        clear_active_task(
+                            args.active_task_file,
+                            expected_key=active_key,
+                            expected_pid=os.getpid(),
+                        )
                 if retrying and args.retry_delay_seconds:
                     time.sleep(args.retry_delay_seconds)
 
             if final_error is not None:
                 failed += 1
                 error_type, error_message = final_error
+                if args.recovery_state_dir is not None:
+                    quarantined = quarantine_python_failure(
+                        args.recovery_state_dir,
+                        recovery_identity(task),
+                        attempts=args.max_attempts,
+                        error_type=error_type,
+                        message=error_message,
+                    )
+                    args.quarantined_task_keys.add(str(quarantined["task_key"]))
                 print(
                     f"FAILED after {args.max_attempts} attempt(s): "
                     f"{task.input_path}: {error_type}: {error_message}",
@@ -1545,6 +1629,11 @@ def main() -> None:
                 )
             elif result == "complete":
                 succeeded += 1
+                if args.recovery_state_dir is not None:
+                    mark_resolved(
+                        args.recovery_state_dir,
+                        recovery_task_key(recovery_identity(task)),
+                    )
             elif result == "locked":
                 locked += 1
             else:
@@ -1553,7 +1642,12 @@ def main() -> None:
         if pool is not None:
             pool.shutdown(wait=True, cancel_futures=True)
 
-    remaining = [task for task in tasks if not task_is_complete(task, expected_config)]
+    remaining = [
+        task
+        for task in tasks
+        if not task_is_complete(task, expected_config)
+        and not task_is_quarantined(task, args)
+    ]
     remaining_on_shard = assigned_pending_tasks(discovered, args, expected_config)
     print(
         "NormalCrafter complete: "
@@ -1564,7 +1658,7 @@ def main() -> None:
     if (
         args.max_videos_per_process
         and args.limit is None
-        and not failed
+        and (not failed or args.recovery_state_dir is not None)
         and not locked
         and not remaining
         and remaining_on_shard
@@ -1591,7 +1685,7 @@ def main() -> None:
                 file=sys.stderr,
                 flush=True,
             )
-    if failed or remaining:
+    if (failed and args.recovery_state_dir is None) or remaining:
         raise SystemExit(1)
 
 
