@@ -136,6 +136,40 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
     records = load_depth_records([source], manifest)
     journal = Journal(root, work)
     receipts = []
+    # Check all streams before moving any dataset file. Receipts also support
+    # recovery when an earlier invocation moved only part of a directory.
+    for i in sorted(manifest):
+        if i // 1000 not in chunks:
+            continue
+        for cam in (1,2):
+            rel = Path(f'images/chunk-{i//1000:03d}/observation.images.depth_{cam:02d}/episode_{i:06d}')
+            src, dst = safe_path(source,rel), safe_path(droid,rel)
+            require((i,cam) in records, f'Source depth sidecar missing: episode {i}/{cam} under {source}')
+            receipt_path = work/'transfer_receipts'/f'episode_{i:06d}_{cam}.json'
+            if receipt_path.exists():
+                receipt = read_json(receipt_path)
+                require(receipt['source']==str(src) and receipt['target']==str(dst), 'Transfer receipt path changed')
+            else:
+                files = frame_files(src)
+                require(len(files)==records[(i,cam)]['frame_count'], f'Incomplete depth output: {src}')
+                entries = []
+                for p in files:
+                    check_png(p,(720,1280,1))
+                    entries.append(dict(name=p.name,sha256=sha256(p)))
+                receipt = dict(source=str(src),target=str(dst),files=entries,complete=False)
+                write_json(receipt_path,receipt)
+            names = [e['name'] for e in receipt['files']]
+            require(names==[f'frame_{f:06d}.png' for f in range(records[(i,cam)]['frame_count'])],
+                    f'Transfer receipt frame count/names changed: {receipt_path}')
+            if dst.exists():
+                extras = [p for p in dst.iterdir() if p.name not in names and not p.name.endswith('.refine-part')]
+                require(not extras, f'Extra target files: {extras[:3]}')
+            for entry in receipt['files']:
+                p, target = src/entry['name'], dst/entry['name']
+                require((target.is_file() and sha256(target)==entry['sha256']) or
+                        (p.is_file() and sha256(p)==entry['sha256']),
+                        f'Neither source nor target matches transfer receipt: {p}')
+    log('Depth transfer preflight passed; all selected streams verified')
     for i, row in sorted(manifest.items()):
         if i // 1000 not in chunks:
             continue
@@ -233,11 +267,11 @@ def calibrate_one(args):
 
 
 def apply_episode(args):
-    root, droid, info, job, camera_result, offset, work = args
+    root, droid, info, job, camera_result, offset, work, *options = args
     root, droid, work = Path(root), Path(droid), Path(work)
     journal = Journal(root, work)
     i, n = job["episode_index"], job["length"]
-    marker = work / "applied" / f"episode_{i:06d}.json"
+    marker = work / (options[0] if options else "applied") / f"episode_{i:06d}.json"
     if marker.exists():
         return read_json(marker)
     for key, original in job["videos"].items():
@@ -263,7 +297,8 @@ def apply_episode(args):
     wrist_hash = array_hash(values(table["observation.camera.extrinsics"])[:, 0])
     table = set_values(table, "index", np.arange(offset, offset + n))
     extrinsics = values(table["observation.camera.extrinsics"]).copy()
-    extrinsics[:, 1:] = np.asarray(camera_result["camera_to_base"])
+    if camera_result['source']!='droid_initial_alignment_only':
+        extrinsics[:, 1:] = np.asarray(camera_result["camera_to_base"])
     table = set_values(table, "observation.camera.extrinsics", extrinsics)
     intrinsics = values(table["observation.camera.intrinsics"]).copy()
     for cam in (1, 2):
@@ -283,7 +318,7 @@ def apply_episode(args):
     return result
 
 
-def update_metadata(root, droid, info, jobs, stats, work):
+def update_metadata(root, droid, info, jobs, stats, work, camera_directory=None, calibration_pending=False):
     journal = Journal(root, work)
     episodes = read_json(work / "original_droid_episodes.json")
     by_id = {j["episode_index"]:j for j in jobs}
@@ -316,7 +351,8 @@ def update_metadata(root, droid, info, jobs, stats, work):
                                        "approximate_decode":"normal_native = normalize(2 * decoded_RGB / 255 - 1)",
                                        "note":"Lossy original annotation, lossless tail trimming"},
                               coordinate_note="Native NormalCrafter view-space axes; no unverified OpenCV axis conversion is asserted.")
-    cameras["calibration"]["source"] = "DROID wrist calibration; PointWorld release or PointWorld depth alignment for external cameras"
+    cameras["calibration"]["source"] = ('DROID initial calibration; external refinement pending'
+        if calibration_pending else 'DROID wrist calibration; PointWorld release or PointWorld depth alignment for external cameras')
     cameras["calibration"]["extrinsics"]["convention"] = "camera_to_robot_base"
     cameras["calibration"]["provenance_path"] = "meta/refinement.jsonl"
     journal.json(droid / "meta/cameras.json", cameras)
@@ -327,7 +363,7 @@ def update_metadata(root, droid, info, jobs, stats, work):
     provenance = []
     stat_by_id = {s["episode_index"]:s for s in stats}
     for job in jobs:
-        camera = read_json(work / "cameras" / f"episode_{job['episode_index']:06d}.json")
+        camera = read_json((camera_directory or work / "cameras") / f"episode_{job['episode_index']:06d}.json")
         provenance.append(dict(episode_index=job["episode_index"], source_episode_id=job["source"]["source_episode_id"],
                                camera_serials=job["source"]["camera_serials"], length=job["length"],
                                original_length=job["original_length"], retained_source_frame_range=[0, job["length"]],
@@ -456,6 +492,7 @@ def run(args):
 def _run_locked(args):
     from .validate import check_subset
     root, work = args.root.resolve(), args.work_dir.resolve()
+    require(not (work/'manual_workflow.json').exists(), 'This work directory uses manual steps. Use run_step.sh instead of the automatic run entry.')
     require(root.is_dir(), f"Missing dataset root: {root}")
     require(not work.is_relative_to(root) and not root.is_relative_to(work), "work-dir must be outside and separate from recam_lerobot")
     work.mkdir(parents=True, exist_ok=True)

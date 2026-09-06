@@ -1,10 +1,33 @@
 # ReCam 全量恢复与 DROID refine
 
-入口：`recam_refine/run_refine.sh`。目标环境为 **Debian 12、Linux x86_64、8 × H100**。
+逐步执行入口：`recam_refine/run_step.sh`。目标环境为 **Debian 12、Linux x86_64、8 × H100**。
 无需 sudo、Conda、Docker、nvcc、ZED SDK、FoundationStereo/NormalCrafter 模型权重。
 脚本直接使用已经生成的深度 PNG、normal MP4 和 Parquet 中的机器人状态。
 
-## 对方服务器的执行命令
+## 推荐：每次只执行一个功能
+
+已有 clone 的更新命令、每一步的命令和完成标志，见 **[STEP_BY_STEP.md](STEP_BY_STEP.md)**。
+
+| 顺序 | `run_step.sh` 的第一个参数 | 本次执行范围 |
+| --- | --- | --- |
+| 1 | `transfer` | 迁移 chunk 2–13 的 external_1/2 metric depth，逐 PNG 校验，然后停止 |
+| 2 | `unpack` | 解包所有子集的 depth TAR；新迁移深度优先；暂时保留 TAR |
+| 3 | `align` | DROID 各模态共同裁尾，重建 metadata/stats、修正来源；保留初始外参 |
+| 4a | `overlap` | 统计 PointWorld UUID/serial 重合，输出逐 episode 明细 |
+| 4b | `refine` | 复用发布外参、优化其余 episode；只生成候选，不写回数据 |
+| 4c | `apply` | 显式写回上一步外参候选，并同步 metadata/stats |
+| 5a | `check` | 全部媒体完整解码、metadata 检查、全 episode 独立帧几何审计 |
+| 5b | `cleanup` | 确认检查后数据未变，再删除 DROID TAR/跨盘源副本、移出日志等辅助内容 |
+
+每步都有独立日志和完成标志；中断后使用相同命令和 work_dir 恢复。
+`status` 查看完成状态。没有前一步完成记录时拒绝跳步；不会自动运行下一步。
+第一步只安装 CPU 环境，不依赖 normal 或 PointWorld。
+可以在 4b 后使用本文后面的审计与点云命令先看候选，再选择何时执行 4c。
+
+## 自动模式兼容入口（使用独立 work_dir）
+
+下面是保留的整套自动执行方式。按上述逐步流程操作时，使用 `run_step.sh`，
+不要把同一个 work_dir 交给 `run_refine.sh`；脚本也会拒绝混用两种流程。
 
 先结束对这个数据目录的下载、深度/normal 标注和训练任务。处理期间数据集必须离线；
 多文件更新发生中断时，用**同一条命令和同一个 work_dir**恢复。

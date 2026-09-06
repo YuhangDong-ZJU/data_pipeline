@@ -50,6 +50,23 @@ def main():
     p.add_argument("--devices", default="0,1,2,3,4,5,6,7", help="GPU IDs, e.g. 0,1 or cpu for tests")
     p.add_argument("--iterations", type=int, default=2000)
     p.add_argument("--defer-cleanup", action="store_true", help="Stop after full media checks so the entry script can audit geometry before cleanup")
+    p = sub.add_parser('transfer-depth',help='Step 1 only: move completed metric depth, verify it, then stop')
+    p.add_argument('root',type=Path)
+    p.add_argument('--work-dir',type=Path,required=True)
+    p.add_argument('--depth-output',type=Path,required=True)
+    p.add_argument('--depth-chunks',default='2-13')
+    p.add_argument('--episode-manifest',type=Path)
+    p = sub.add_parser('run-step',help='Run exactly one manual stage, then stop')
+    p.add_argument('step',choices=('unpack','align','overlap','refine','apply','check','cleanup','status'))
+    p.add_argument('root',type=Path)
+    p.add_argument('--work-dir',type=Path,required=True)
+    p.add_argument('--episode-manifest',type=Path)
+    p.add_argument('--depth-metadata',type=Path,nargs='*',default=[])
+    p.add_argument('--pointworld-cameras',type=Path)
+    p.add_argument('--workers',type=int,default=4)
+    p.add_argument('--devices',default='0,1,2,3,4,5,6,7')
+    p.add_argument('--iterations',type=int,default=2000)
+    p.add_argument('--audit-frames',type=int,default=8)
     p = sub.add_parser("check", help="Read-only full media decoding and metadata validation")
     p.add_argument("root", type=Path)
     p.add_argument("--report-dir", type=Path, required=True)
@@ -98,6 +115,12 @@ def main():
         elif args.command == "run":
             from .pipeline import run
             run(args)
+        elif args.command == 'transfer-depth':
+            from .steps import transfer_only
+            transfer_only(args)
+        elif args.command == 'run-step':
+            from .steps import run_step
+            run_step(args)
         elif args.command == "check":
             from .pipeline import discover
             from .validate import check_subset
@@ -131,10 +154,13 @@ def main():
             prepare_viewer(args)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
-        if args.command == "run" and not args.work_dir.resolve().is_relative_to(args.root.resolve()):
+        if args.command in ('run','transfer-depth','run-step') and not args.work_dir.resolve().is_relative_to(args.root.resolve()):
             import traceback
             from .common import write_json
-            write_json(args.work_dir / "FAILED.json", dict(error=str(exc), traceback=traceback.format_exc()))
+            name = ('FAILED.json' if args.command=='run' else 'STEP1_FAILED.json' if args.command=='transfer-depth'
+                    else args.step.upper()+'_FAILED.json')
+            write_json(args.work_dir / name,
+                       dict(error=str(exc), traceback=traceback.format_exc()))
         return 1
     return 0
 

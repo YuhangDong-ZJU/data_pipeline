@@ -9,6 +9,27 @@ import tarfile
 from .common import require, read_json, read_jsonl, write_json, write_jsonl, atomic_bytes, sha256
 
 
+def download_manifest(work, chunks):
+    """Step 1 downloads source identities without PointWorld cameras/assets."""
+    from huggingface_hub import HfApi, hf_hub_download
+    work = Path(work) / 'inputs'
+    work.mkdir(parents=True,exist_ok=True)
+    versions = work/'hub_revisions.json'
+    revisions = read_json(versions) if versions.exists() else {}
+    repo = 'Sponbebob4258/droid-24k-external-svo'
+    if repo not in revisions:
+        revisions[repo] = HfApi().dataset_info(repo).sha
+        write_json(versions,revisions)
+    rows = []
+    for chunk in chunks:
+        path = hf_hub_download(repo,f'manifests/chunks/chunk-{chunk:03d}.jsonl',repo_type='dataset',
+                               revision=revisions[repo],local_dir=work/repo.split('/')[1])
+        rows.extend(read_jsonl(path))
+    output = work/'transfer_episode_manifest.jsonl'
+    write_jsonl(output,rows)
+    return output
+
+
 def download_inputs(work, chunks):
     from huggingface_hub import HfApi, hf_hub_download
     import zstandard
@@ -16,11 +37,11 @@ def download_inputs(work, chunks):
     work.mkdir(parents=True, exist_ok=True)
     versions = work / "hub_revisions.json"
     repos = ["Sponbebob4258/droid-24k-external-svo", "nvidia/PointWorld-DROID"]
-    if versions.exists():
-        revisions = read_json(versions)
-    else:
-        revisions = {repo: HfApi().dataset_info(repo).sha for repo in repos}
-        write_json(versions, revisions)
+    revisions = read_json(versions) if versions.exists() else {}
+    for repo in repos:
+        if repo not in revisions:
+            revisions[repo] = HfApi().dataset_info(repo).sha
+    write_json(versions, revisions)
     def fetch(repo, filename):
         return Path(hf_hub_download(repo, filename, repo_type="dataset", revision=revisions[repo],
                                    local_dir=work / repo.split("/")[1]))

@@ -44,7 +44,7 @@ def check_png(path, shape=None, depth=True):
         im.verify()
 
 
-def unpack_archive(archive, subset, receipt_root):
+def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
     archive, subset = Path(archive), Path(subset)
     rel_archive = archive.relative_to(subset).as_posix()
     receipt = Path(receipt_root) / (hashlib.sha256(str(archive).encode()).hexdigest() + ".json")
@@ -55,6 +55,8 @@ def unpack_archive(archive, subset, receipt_root):
         require(saved["sha256"] == archive_hash, f"Archive changed since extraction: {archive}")
     members = set()
     bytes_written = 0
+    superseded = 0
+    authoritative_streams = authoritative_streams or {}
     with tarfile.open(archive, "r:*") as tar:
         for member in tar:
             require(not (member.issym() or member.islnk() or member.isdev() or member.isfifo()),
@@ -83,7 +85,15 @@ def unpack_archive(archive, subset, receipt_root):
                     os.fsync(dst.fileno())
                 require(size == member.size, f"Truncated TAR member: {rel}")
                 check_png(part)
-                if target.exists():
+                authority = authoritative_streams.get(PurePosixPath(rel).parent.as_posix())
+                if authority is not None:
+                    if target.name in authority:
+                        require(target.is_file() and sha256(target)==authority[target.name],
+                                f'Migrated depth changed before TAR extraction: {target}')
+                    else:
+                        require(not target.exists(), f'Unexpected frame outside migrated depth stream: {target}')
+                    superseded += 1
+                elif target.exists():
                     require(sha256(target) == h.hexdigest(), f"Existing PNG conflicts with TAR: {target}")
                 else:
                     os.replace(part, target)
@@ -92,8 +102,9 @@ def unpack_archive(archive, subset, receipt_root):
             finally:
                 part.unlink(missing_ok=True)
     require(members, f"Empty depth TAR: {archive}")
-    write_json(receipt, dict(archive=str(archive), sha256=archive_hash, files=len(members), bytes_written=bytes_written))
-    return dict(archive=str(archive), sha256=archive_hash, files=len(members))
+    write_json(receipt, dict(archive=str(archive), sha256=archive_hash, files=len(members),
+                            bytes_written=bytes_written,superseded_by_metric_depth=superseded))
+    return dict(archive=str(archive), sha256=archive_hash, files=len(members),superseded_by_metric_depth=superseded)
 
 
 def frame_files(directory):

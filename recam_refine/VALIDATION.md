@@ -1,5 +1,42 @@
 # 验证记录（2026-09-06）
 
+## 更新：按功能独立执行
+
+新增 `run_step.sh`，顺序为 transfer → unpack → align → overlap → refine → apply → check → cleanup。
+每步单独停止，候选生成不写回数据，检查通过后也不会自动整理。
+
+本次验证：
+
+- Debian 12 / glibc 2.36 用户空间中 **21 项测试全部通过**。测试代码和独立运行时绑定进用户命名空间，未修改宿主系统。
+- 新增完整分步测试从真实格式的 1280×720、uint16 PNG 迁移开始，覆盖旧 TAR 与新深度冲突保护、
+  已裁过的数据与后补 normal 再对齐、对齐写入中断后重跑、PointWorld 发布矩阵转换、候选不写回、
+  显式写回及 wrist/状态保持、全量媒体检查、检查失败/检查后数据改变时拒绝整理、最终 TAR/日志策略。
+- 另测第一步在没有 normal、RGB、PointWorld 依赖的数据目录上独立完成；第二个相机的 PNG 损坏时，
+  在移动任何数据文件之前停止。修复输入后使用原命令恢复，重复执行不重复迁移。
+- 同盘 `/tmp` 与跨盘 `/tmp` → `/data2/recam_refine_validation_20260906` 分别实测移动/复制和重跑，均通过。
+- 直接执行交付的 Bash 入口及 CLI：transfer、unpack、align、overlap、refine、apply、status；
+  未通过 check 的 cleanup 被拒绝，TAR 和日志仍在。
+- GPU 入口验证自动环境检查，在 8 张 RTX 4090 上完成 PyTorch 2.5.1 + CUDA 12.4 的实际 `grid_sample` 前向/反向；
+  没有对方 H100 机器的直接访问权限，因此不声称已在那台 8×H100 上实跑。
+- Bash 语法与 Ruff 检查通过；CI 增加 Debian 12 的 Bash/CLI 命令测试。CPU-only CI 的两个 Torch 依赖测试会跳过，
+  上述带 Torch 的 Debian 12 用户空间验证则运行了全部 21 项。
+
+分步测试使用临时构造的 DROID + simulation 数据，未改写 `/data2/droid` 或 `/data/dyh/recam_lerobot`。
+**分步调度测试用替身控制几何验收结果，以覆盖允许/拒绝整理两条路径；不把合成样例当作真实外参质量证据。**
+几何指标自身另有独立测试，真实样例的质量、目标函数/FK 对照证据仍见下文；这次拆分没有更改优化目标或质量门槛。
+也没有将 18k+ episode 全量重新跑一遍，不能由这些测试保证所有真实 episode 都会通过几何验收。
+
+复现命令（在仓库根目录，运行时已经由 bootstrap 建立）：
+
+```bash
+"$RECAM_WORK/runtime/env/bin/python" -m unittest discover -s recam_refine/tests -v
+"$RECAM_WORK/runtime/env/bin/python" -m recam_refine.tests.smoke_manual_entry \
+  --runtime-work-dir "$RECAM_WORK"
+```
+
+有空闲 CUDA GPU 时为第二条命令加 `--gpu-bootstrap`，可一并检查 GPU 环境入口。
+日志保存在测试目录 `manual_debian12_validation.log`、`manual_cli_validation.log`、`manual_cli_gpu_validation.log`。
+
 ## 更新：双相机质量审计与可视化
 
 此前的 7.72 → 6.08 cm 来自 episode 9 的 **external_1 单相机、少量验证帧**，
