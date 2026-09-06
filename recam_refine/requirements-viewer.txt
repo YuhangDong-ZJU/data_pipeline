@@ -1,0 +1,4 @@
+# Optional viewer runtime, separate from the data processing environment.
+viser==1.1.0
+numpy==1.26.4
+Pillow==11.1.0

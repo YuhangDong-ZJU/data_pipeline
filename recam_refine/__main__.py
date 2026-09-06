@@ -82,6 +82,12 @@ def main():
     p.add_argument("--after", choices=("recam_candidate", "pointworld_release"))
     p.add_argument("--detail-bounds", type=float, nargs=6, metavar=("XMIN","YMIN","ZMIN","XMAX","YMAX","ZMAX"),
                    help="Optional shared detail crop in robot-base meters")
+    p = sub.add_parser("prepare-viewer", help="Package audited point clouds and the matching URDF pose for Viser")
+    p.add_argument("root", type=Path)
+    p.add_argument("--fusion-dir", type=Path, required=True)
+    p.add_argument("--metrics", type=Path, required=True)
+    p.add_argument("--robot-urdf", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     os.environ.setdefault("OMP_NUM_THREADS", "2")
     if getattr(args, "workers", 1) < 1 or getattr(args, "iterations", 1) < 1:
@@ -120,6 +126,9 @@ def main():
         elif args.command == "visualize-fusion":
             from .fusion import run_fusion
             run_fusion(args)
+        elif args.command == "prepare-viewer":
+            from .viewer_bundle import prepare_viewer
+            prepare_viewer(args)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         if args.command == "run" and not args.work_dir.resolve().is_relative_to(args.root.resolve()):

@@ -185,3 +185,33 @@ PointWorld 发布代码的 0.10 m 筛选线也不是高精度操作的误差保�
 输入 PNG/MP4 必须与审计记录的 SHA-256 相符，导出后再次核对源文件未改变。
 输出必须位于数据集外，并与审计目录分开。HTML 内嵌 Plotly，不需要网络或额外查看环境。
 换帧、外参版本或局部裁剪时使用新的输出目录，避免混用旧图。
+
+### Viser：半透明机器人与相机 RGB 视锥
+
+若希望像 PointWorld 项目页一样，直接检查点云与机器人模型是否贴合，可把上述融合结果打包：
+
+```bash
+/absolute/path/recam_refine_work/runtime/env/bin/python -m recam_refine prepare-viewer \
+  /absolute/path/recam_lerobot \
+  --fusion-dir /absolute/path/recam_refine_work/fusion_episode_000009 \
+  --metrics /absolute/path/recam_refine_work/camera_gallery/episode_000009/metrics.json \
+  --robot-urdf /absolute/path/recam_refine_work/pointworld/assets/franka_description/franka_panda_robotiq_2f85_og.urdf \
+  --output-dir /absolute/path/recam_refine_work/viser_episode_000009
+```
+
+机器人网格由该帧关节/夹爪状态做正运动学得到；切换前后时模型与观察视角固定，只改变点云和相机的外参。
+打包时重新核对 Parquet 与审计记录的摘要，输出放在数据集外。查看器只读取这个可搬移的包。
+
+Viser 是可选环境，不改变生产处理环境。在查看用的计算机上建立独立 venv：
+
+```bash
+python3 -m venv /absolute/path/recam_viewer_env
+/absolute/path/recam_viewer_env/bin/python -m pip install --require-hashes -r recam_refine/requirements-viewer.lock
+/absolute/path/recam_viewer_env/bin/python recam_refine/viser_viewer.py \
+  /absolute/path/recam_refine_work/viser_episode_000009 \
+  --port 8870 --export-dir /absolute/path/recam_refine_work/viser_episode_000009/static
+```
+
+打开 `http://127.0.0.1:8870`。可切换优化前后、真实 RGB/相机双色、点大小、模型不透明度，以及相机/坐标轴显隐。
+服务只监听本机，不上传场景。导出的 `before.html` / `after.html` 是独立可旋转的 3D 页面，内嵌数据与查看器，
+无需 Python 服务即可打开；独立页面不包含实时 Python 控件。
