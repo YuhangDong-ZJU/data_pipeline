@@ -115,7 +115,7 @@ def serve(directory, port, export_dir=None):
             server.flush()
             (export_dir/f'{variant}.html').write_text(server.get_scene_serializer().as_html(),encoding='utf-8')
         update()
-    print(f'RECAM VISER http://127.0.0.1:{port}',flush=True)
+    print(f'RECAM VISER http://127.0.0.1:{server.get_port()}',flush=True)
     try:
         threading.Event().wait()
     except KeyboardInterrupt:
