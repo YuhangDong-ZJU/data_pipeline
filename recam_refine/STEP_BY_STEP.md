@@ -120,11 +120,37 @@ bash recam_refine/run_step.sh overlap "$RECAM_ROOT" "$RECAM_WORK"
 
 ```bash
 bash recam_refine/run_step.sh refine "$RECAM_ROOT" "$RECAM_WORK" \
-  --devices 0,1,2,3,4,5,6,7 --workers 4
+  --devices 0,1,2,3,4,5,6,7 --gpu-batch-size 0
 ```
 
 这是首次需要 GPU 依赖的步骤；入口自动安装固定版本 PyTorch/CUDA 用户态库并检查可见 GPU，
 不更改系统驱动、CUDA 或 Conda。目标为 Debian 12 / 8 × H100，不要求 nvcc 或 ZED SDK。
+
+新工作目录默认使用批量 FP32 / CUDA Graph 后端：每卡一个常驻进程，同时优化多个相机，
+动态领取任务，并在 GPU 计算期间预读下一批。`--gpu-batch-size 0` 按**可用显存**保守选择每批相机数，
+最多 32 个相机（16 个 episode）；显存不足会缩小批量并记住该卡的上限。
+参数的单位是**相机**，不是 episode。默认即可运行，不需要自行修改代码或安装额外依赖。
+
+默认先运行 2,000 次；可观测但未通过的相机保留当前参数、Adam 动量和最佳结果，
+合批继续到**总计 6,000 次**，不再重新计算前 2,000 次。每 1,000 次保存独立相机断点。
+恢复时核对原始 PNG/Parquet、内参、初值、采样点与协议摘要；输入发生变化则拒绝复用断点。
+自定义 `--iterations` 时按指定预算运行，不自动扩展。
+
+已经用旧版本开始的工作目录会继续使用原 reference 后端，避免混合两种数值协议；
+新工作目录可显式加 `--refine-backend reference` 进行对照。不要为了切换后端删除已有工作目录。
+批量大小、GPU 数量可在恢复时调整。`--no-cuda-graphs` 可使用相同数学目标的普通批量 CUDA 路径。
+
+观察进度与性能：
+
+```bash
+tail -f "$RECAM_WORK/step_refine.log"
+```
+
+`calibration_workers.json` 记录各卡初始批量和可用显存；`calibration_performance.jsonl` 记录
+每批耗时、相机数、续跑数、进程 PID 和峰值张量显存；`calibration_timing.json` 是本次运行汇总。
+可在另一个终端执行 `nvidia-smi pmon -s um -d 1`，按日志中的 PID 查看本任务的活动，
+避免把其他作业的 GPU 利用率算进来。启动、输入读取和最后不足一批时利用率会波动。
+实测范围、速度和新旧质量差异见 [PERFORMANCE.md](PERFORMANCE.md)。
 
 重合部分使用通过筛选的 PointWorld 发布外参；其余以 DROID 初值运行 PointWorld 机器人网格深度方法。
 候选按拟合/选择验证指标筛选，默认失败且可观测的相机有有界重试；未通过的相机保留官方初值并记录原因。

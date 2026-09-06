@@ -18,6 +18,7 @@ from .common import check_transform, require, read_json, write_json
 
 
 POINTWORLD_COMMIT = "3872ec6ee73146aa671192ef79b5dfbedc0246e3"
+BATCHED_BACKEND_VERSION = 'batched-fp32-v1'
 URDF_RELATIVE = "assets/franka_description/franka_panda_robotiq_2f85_og.urdf"
 
 

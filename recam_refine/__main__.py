@@ -19,8 +19,10 @@ def doctor(gpu=False):
                   av=av.__version__, pyarrow=pyarrow.__version__, numpy=np.__version__, pillow=Image.__version__)
     if gpu:
         import torch
+        from .batched import CameraBatch
         require(torch.cuda.is_available(), "No CUDA GPU accessible; check NVIDIA driver and CUDA_VISIBLE_DEVICES")
         devices = []
+        graphs = []
         for i in range(torch.cuda.device_count()):
             # Exercise grid_sample forward/backward, the actual calibration
             # operation, not just CUDA availability. No CUDA toolkit is needed.
@@ -28,9 +30,27 @@ def doctor(gpu=False):
             g = torch.zeros((1,1,4,2), device=f"cuda:{i}", requires_grad=True)
             torch.nn.functional.grid_sample(d, g, align_corners=True).sum().backward()
             torch.cuda.synchronize(i)
+            xy = np.stack(np.meshgrid(np.linspace(-.2,.2,10),np.linspace(-.2,.2,10)),-1).reshape(-1,2)
+            points = np.column_stack([xy,np.ones(len(xy))]).astype(np.float32)
+            fixture = dict(initial=np.eye(4),k=np.array([[50,0,32],[0,50,24],[0,0,1]]),
+                           depths=[np.ones((48,64),np.float32)]*4,points=[points]*4)
+            batch = CameraBatch([fixture],f'cuda:{i}',min_points=10)
+            batch.advance(2)
+            require(batch.finish()[0][1]['accepted'],f'Batched CUDA optimizer check failed on GPU {i}')
+            graphs.append(batch.graph is not None)
+            del batch
             devices.append(torch.cuda.get_device_name(i))
-        result.update(torch=torch.__version__, cuda=torch.version.cuda, devices=devices)
+        result.update(torch=torch.__version__, cuda=torch.version.cuda, devices=devices,batched_cuda_graphs=graphs)
     print(json.dumps(result, indent=2), flush=True)
+
+
+def calibration_options(parser):
+    parser.add_argument('--refine-backend',choices=('auto','batched','reference'),default='auto',
+                        help='New CUDA runs use batched FP32; existing work directories retain their saved backend')
+    parser.add_argument('--gpu-batch-size',type=int,default=0,
+                        help='Maximum cameras per GPU batch (two per episode); 0 sizes from free VRAM with OOM backoff')
+    parser.add_argument('--no-cuda-graphs',action='store_true',
+                        help='Use eager batched GPU execution; same inputs, budget and quality gates')
 
 
 def main():
@@ -49,6 +69,7 @@ def main():
     p.add_argument("--workers", type=int, default=4, help="CPU/I/O processes; default 4 avoids overwhelming shared storage")
     p.add_argument("--devices", default="0,1,2,3,4,5,6,7", help="GPU IDs, e.g. 0,1 or cpu for tests")
     p.add_argument("--iterations", type=int, default=2000)
+    calibration_options(p)
     p.add_argument("--defer-cleanup", action="store_true", help="Stop after full media checks so the entry script can audit geometry before cleanup")
     p = sub.add_parser('transfer-depth',help='Step 1 only: move completed metric depth, verify it, then stop')
     p.add_argument('root',type=Path)
@@ -66,6 +87,7 @@ def main():
     p.add_argument('--workers',type=int,default=4)
     p.add_argument('--devices',default='0,1,2,3,4,5,6,7')
     p.add_argument('--iterations',type=int,default=2000)
+    calibration_options(p)
     p.add_argument('--audit-frames',type=int,default=8)
     p = sub.add_parser("check", help="Read-only full media decoding and metadata validation")
     p.add_argument("root", type=Path)
@@ -109,6 +131,8 @@ def main():
     os.environ.setdefault("OMP_NUM_THREADS", "2")
     if getattr(args, "workers", 1) < 1 or getattr(args, "iterations", 1) < 1:
         parser.error("workers and iterations must be positive")
+    if getattr(args,'gpu_batch_size',0) < 0:
+        parser.error('gpu-batch-size must be zero (auto) or positive')
     try:
         if args.command == "doctor":
             doctor(args.gpu)

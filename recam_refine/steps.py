@@ -7,7 +7,7 @@ import argparse
 from contextlib import contextmanager
 import hashlib
 import json
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 
 from .common import require, read_json, read_jsonl, write_json, sha256, media_path, parquet_path
 from .inputs import canonical_manifest, download_manifest
@@ -228,14 +228,21 @@ def camera_inputs(root,work,args):
 
 
 def refine_only(root,work,args):
-    from .pipeline import calibrate_one
-    from .pointworld import prepare_assets
-    from multiprocessing import get_context
+    from .calibration import run_calibrations, select_backend
+    from .pointworld import prepare_assets, BATCHED_BACKEND_VERSION
     droid = root/'real_world/droid'
     entries,camera_dir = camera_inputs(root,work,args)
-    freeze_settings(work,'refine',dict(iterations=args.iterations,camera_directory=str(camera_dir.resolve()),
+    saved_path = work/'step_settings/refine.json'
+    saved = read_json(saved_path) if saved_path.exists() else None
+    backend = select_backend(args,saved)
+    settings = dict(iterations=args.iterations,camera_directory=str(camera_dir.resolve()),
         camera_files={job['source']['source_episode_id']:sha256(camera_dir/(job['source']['source_episode_id']+'_cameras.json'))
-                      for job,_,_ in entries if (camera_dir/(job['source']['source_episode_id']+'_cameras.json')).exists()}))
+                      for job,_,_ in entries if (camera_dir/(job['source']['source_episode_id']+'_cameras.json')).exists()})
+    if saved is None or 'backend' in saved:
+        settings['backend'] = backend
+    if backend == 'batched':
+        settings['backend_version'] = BATCHED_BACKEND_VERSION
+    freeze_settings(work,'refine',settings)
     jobs,info = read_json(work/'plan.json'),read_json(work/'training_info.json')
     pending = []
     for job,poses,status in entries:
@@ -248,30 +255,8 @@ def refine_only(root,work,args):
         else:
             pending.append((job,output))
     if pending:
-        import torch
-        devices = args.devices.split(',')
-        require(all(d=='cpu' or (d.isdigit() and int(d)<torch.cuda.device_count()) for d in devices),'Unavailable GPU; check --devices')
         urdf = prepare_assets(work/'pointworld')
-        pools = [ProcessPoolExecutor(max_workers=1,mp_context=get_context('spawn')) for _ in devices]
-        errors = []
-        try:
-            futures = {}
-            for n,(job,output) in enumerate(pending):
-                slot = n%len(devices)
-                device = 'cpu' if devices[slot]=='cpu' else 'cuda:'+devices[slot]
-                future = pools[slot].submit(calibrate_one,(str(droid),info,job,str(output),str(urdf),device,args.iterations))
-                futures[future] = job['episode_index']
-            for n,future in enumerate(as_completed(futures),1):
-                try:
-                    future.result()
-                except Exception as exc:
-                    errors.append(dict(episode_index=futures[future],error=str(exc)))
-                print(f'Calibrate {n}/{len(pending)}',flush=True)
-        finally:
-            for pool in pools:
-                pool.shutdown(wait=True,cancel_futures=True)
-        write_json(work/'calibration_failures.json',errors)
-        require(not errors,'Calibration jobs failed; inspect calibration_failures.json and rerun this step')
+        run_calibrations(droid,info,pending,urdf,work,args,backend)
     retained = []
     for job in jobs:
         camera = read_json(work/'cameras'/f'episode_{job["episode_index"]:06d}.json')

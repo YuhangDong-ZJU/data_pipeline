@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
+from functools import lru_cache
 import os
 from pathlib import Path
 import shutil
@@ -226,6 +227,11 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
     write_json(work / "depth_transfer.json", receipts)
 
 
+@lru_cache(maxsize=1)
+def calibration_robot(urdf):
+    return Robot(urdf)
+
+
 def calibrate_one(args):
     root, info, job, output, urdf, device, iterations = args
     output = Path(output)
@@ -237,7 +243,7 @@ def calibrate_one(args):
     gripper = values(table["observation.states.gripper_state"]).ravel()
     require(np.isfinite(joints).all() and np.isfinite(gripper).all() and np.all((gripper >= 0) & (gripper <= 1)), f"Invalid robot configuration: {i}")
     indices = np.unique(np.linspace(0, job["length"] - 1, min(16, job["length"]), dtype=int))
-    robot = Robot(urdf)
+    robot = calibration_robot(urdf)
     points = [robot.points(joints[t], gripper[t]) for t in indices]
     poses, metrics = [], []
     for cam in (1, 2):
@@ -508,6 +514,13 @@ def _run_locked(args):
                   pointworld_cameras=str(args.pointworld_cameras.resolve()) if args.pointworld_cameras else None,
                   iterations=args.iterations, version=1)
     config_path = work / "configuration.json"
+    from .calibration import run_calibrations, select_backend, BATCHED_BACKEND_VERSION
+    saved = read_json(config_path) if config_path.exists() else None
+    backend = select_backend(args,saved)
+    if saved is None or 'backend' in saved:
+        config['backend'] = backend
+    if backend == 'batched':
+        config['backend_version'] = BATCHED_BACKEND_VERSION
     if config_path.exists():
         require(read_json(config_path) == config, f"Configuration differs from saved run: {config_path}. Resume with the original arguments.")
     else:
@@ -580,38 +593,8 @@ def _run_locked(args):
         write_json(work / "pointworld_overlap.json", dict(overlap))
         log(f"PointWorld overlap: {dict(overlap)}; pending optimizations: {len(pending)}")
         if pending:
-            import torch
-            require(torch.cuda.is_available() or args.devices == "cpu", "CUDA unavailable. Run the installer with --gpu.")
-            devices = args.devices.split(",")
-            for device in devices:
-                if device != "cpu":
-                    require(device.isdigit() and int(device) < torch.cuda.device_count(), f"Invalid GPU: {device}")
             urdf = prepare_assets(work / "pointworld")
-            # One process per GPU, one task at a time per process. The parent
-            # never initializes a CUDA context; spawn avoids fork/CUDA hazards.
-            from multiprocessing import get_context
-            pools = [ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) for _ in devices]
-            futures = []
-            try:
-                for n, (job, result) in enumerate(pending):
-                    slot = n % len(devices)
-                    device = "cpu" if devices[slot] == "cpu" else "cuda:" + devices[slot]
-                    futures.append((job, pools[slot].submit(calibrate_one, (str(droid), info, job, str(result), str(urdf), device, args.iterations))))
-                failures = []
-                from concurrent.futures import as_completed
-                identities = {future:job for job, future in futures}
-                for n, future in enumerate(as_completed(identities), 1):
-                    job = identities[future]
-                    try:
-                        future.result()
-                    except Exception as exc:
-                        failures.append(dict(episode_index=job["episode_index"], error=str(exc)))
-                    log(f"Calibrate {n}/{len(pending)}; failed={len(failures)}")
-                write_json(work / "calibration_failures.json", failures)
-                require(not failures, f"{len(failures)} episodes failed calibration quality gates; see {work / 'calibration_failures.json'}. No failed extrinsics were applied.")
-            finally:
-                for pool in pools:
-                    pool.shutdown(wait=True, cancel_futures=True)
+            run_calibrations(droid,info,pending,urdf,work,args,backend)
         finish("04_cameras")
     if not done("05_apply"):
         offset, tasks = 0, []
