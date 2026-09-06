@@ -15,10 +15,24 @@ jobs:
       - name: Install test dependency
         run: python -m pip install numpy==1.26.4
       - name: Check Python syntax
-        run: python -m compileall -q dataset_download droid_depth droid_normals
+        run: python -m compileall -q dataset_download droid_depth droid_normals recam_refine
       - name: Check Bash syntax
         run: find . -type f -name '*.sh' -print0 | xargs -0 -n1 bash -n
       - name: Run dataset download tests
         run: python -m unittest discover -s dataset_download/tests -v
       - name: Run DROID normals tests
         run: python -m unittest discover -s droid_normals/tests -v
+
+  refine-debian12:
+    runs-on: ubuntu-latest
+    container: debian:12-slim
+    steps:
+      - name: Install bootstrap prerequisites
+        run: apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates git
+      - uses: actions/checkout@v4
+      - name: Install locked rootless refinement runtime
+        run: python3 recam_refine/bootstrap.py /tmp/recam-refine-ci
+      - name: Run transactional media and metadata tests
+        run: /tmp/recam-refine-ci/runtime/env/bin/python -m unittest discover -s recam_refine/tests -v
+      - name: Lint refinement code
+        run: /tmp/recam-refine-ci/runtime/uv tool run ruff==0.12.10 check recam_refine
