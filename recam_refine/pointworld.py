@@ -24,6 +24,11 @@ URDF_RELATIVE = "assets/franka_description/franka_panda_robotiq_2f85_og.urdf"
 class CalibrationRejected(RuntimeError):
     """Geometrically unobservable or worse than the official initialization."""
 
+    def __init__(self, message, candidate=None, metrics=None):
+        super().__init__(message)
+        self.candidate = candidate
+        self.metrics = metrics
+
 
 def release_pose(path, row, max_loss=.10):
     """Published matrices transform panda_link0 points INTO OpenCV cameras."""
@@ -95,7 +100,7 @@ class Robot:
     No renderer/OpenGL/CUDA extension/urdfpy/networkx-2.2 dependency. Geometry,
     area-weighted sampling and gripper scaling follow the upstream pipeline.
     """
-    def __init__(self, urdf, samples=25000, seed=42):
+    def __init__(self, urdf, samples=25000, seed=42, keep_meshes=False):
         import trimesh
         self.urdf = Path(urdf)
         tree = ET.parse(urdf).getroot()
@@ -114,10 +119,13 @@ class Robot:
                     visuals.append((link.attrib["name"], origin(v.find("origin")), mesh, area))
         total = sum(v[3] for v in visuals)
         self.visuals = []
+        self.meshes = []
         for i, (name, transform, mesh, area) in enumerate(visuals):
             # Same area allocation and minimum 200 points per mesh as upstream.
             points, _ = trimesh.sample.sample_surface(mesh, max(200, int(samples * area / total)), seed=seed + i)
             self.visuals.append((name, transform, points))
+            if keep_meshes:
+                self.meshes.append((name, transform, np.asarray(mesh.vertices), np.asarray(mesh.faces)))
 
     def transforms(self, joints, gripper):
         cfg = {f"panda_joint{i + 1}": float(v) for i, v in enumerate(joints)}
@@ -159,6 +167,18 @@ class Robot:
             t = transforms[name] @ visual
             out.append(points @ t[:3, :3].T + t[:3, 3])
         return np.concatenate(out).astype(np.float32)
+
+    def geometry(self, joints, gripper):
+        """Full visual triangles for deterministic, headless audit masks."""
+        require(self.meshes, "Construct Robot with keep_meshes=True for audit masks")
+        transforms = self.transforms(joints, gripper)
+        vertices, faces, offset = [], [], 0
+        for name, visual, vv, ff in self.meshes:
+            t = transforms[name] @ visual
+            vertices.append(vv @ t[:3, :3].T + t[:3, 3])
+            faces.append(ff + offset)
+            offset += len(vv)
+        return np.concatenate(vertices), np.concatenate(faces)
 
 
 def pose_matrix(p):
@@ -252,5 +272,31 @@ def refine_camera(initial_c2b, k, depths, points, device="cuda", iterations=2000
                    translation_change_m=shift, rotation_change_deg=angle, train_frames=train,
                    holdout_frames=holdout, accepted=accepted, iterations=iterations)
     if not accepted:
-        raise CalibrationRejected(f"Calibration quality gate failed: {metrics}")
+        raise CalibrationRejected(f"Calibration quality gate failed: {metrics}", candidate=result, metrics=metrics)
     return check_transform(result, "refined camera"), metrics
+
+
+def refine_camera_with_retry(initial_c2b, k, depths, points, device="cuda", iterations=2000):
+    """Retry an observable failed default fit with 6000 iterations, same gate.
+
+    High-quality DROID initialization can still need a larger angular update.
+    Retry uses the SAME initial pose, frame split, objective and thresholds.
+    Custom iteration budgets are honored; insufficient visibility is not retried.
+    """
+    try:
+        pose, metrics = refine_camera(initial_c2b, k, depths, points, device, iterations)
+        metrics["attempts"] = [dict(iterations=iterations, accepted=True)]
+        return pose, metrics
+    except CalibrationRejected as first:
+        if iterations != 2000 or first.metrics is None:
+            raise
+        attempt = dict(iterations=2000, accepted=False, metrics=first.metrics)
+        try:
+            pose, metrics = refine_camera(initial_c2b, k, depths, points, device, 6000)
+        except CalibrationRejected as second:
+            if second.metrics is not None:
+                second.metrics["attempts"] = [attempt, dict(iterations=6000, accepted=False)]
+            raise CalibrationRejected(f"Both 2000- and 6000-iteration fits failed: {second}",
+                                      candidate=second.candidate, metrics=second.metrics) from second
+        metrics["attempts"] = [attempt, dict(iterations=6000, accepted=True)]
+        return pose, metrics

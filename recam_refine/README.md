@@ -30,6 +30,13 @@ bash recam_refine/run_refine.sh \
 normal 应已在 `real_world/droid/videos/chunk-*/observation.images.normal_01|02/` 下。
 不会处理 wrist 的 depth/normal；wrist RGB 和逐帧外参保留。
 
+入口脚本最后会自动执行全量外参几何审计：每个 episode 抽取 8 个未用于本次优化/选择的帧，
+计算两个外部相机的机器人深度残差和双视角 F1@5/20 mm，4 个 CPU 进程并行。
+几何检查通过后才最终删除 DROID TAR、清理跨盘源 PNG、移出辅助日志。
+全量扫描不生成逐 episode 大图，避免产生数十 GB 的预览；选定样例的大图用下方命令生成。
+**发现指标退步、几何不可用或深度残差超过门槛时，入口返回状态码 2，并保留详细报告；这表示质量待复核，不是环境安装失败。**
+此时数据已对齐，但仍处于离线处理中；保留 `READY_FOR_GEOMETRY_AUDIT.json`，不会生成最终 `SUCCESS.json`。
+
 若你们处理的其他 chunk 还有 FoundationStereo 原始 sidecar，请一起提供：
 
 ```bash
@@ -90,6 +97,11 @@ simulation 和其他 real_world 子集的原始媒体与标注方法保持原样
 若后者为 false，请查看 `retained_official_calibrations.json`：这些相机仍使用原有官方标定，不能称为全部优化成功。
 结构检查通过也不等同于用真值证明了每个像素的 depth/normal 预测精度。
 
+入口最后新增的几何审计见 `camera_audit/index.html`、`camera_audit/summary.json`：
+`camera_audit/COMPLETE.json` 只表示所有要求的测量已完成。
+若存在 `camera_audit/QUALITY_REVIEW_REQUIRED.json`，仍有相机/episode 需要复核，不能仅凭前面的 `SUCCESS.json`
+宣布外参质量已全部达标。审计不会再次改写数据；修正候选后可以单独重跑审计。
+
 断电、进程中断或暂时下载失败后，重新执行原命令即可。不要删除 work_dir、换另一个 work_dir 重跑半成品，
 也不要同时启动下载器/标注器/训练器修改数据。备份和已移出的内容在 work_dir，处理完成后仍保留。
 
@@ -114,3 +126,38 @@ simulation 和其他 real_world 子集的原始媒体与标注方法保持原样
 验证记录见 [VALIDATION.md](VALIDATION.md)。PointWorld 方法的来源为 [data 分支](https://github.com/NVlabs/PointWorld/tree/data)，
 相机发布数据来自 [PointWorld-DROID](https://huggingface.co/datasets/nvidia/PointWorld-DROID)。
 本目录优化目标改编代码保留 Apache-2.0 声明，许可证见 [POINTWORLD_LICENSE](POINTWORLD_LICENSE)。
+
+## 可视化比较与 PointWorld 质量指标
+
+在仓库根目录运行。使用同一个 work_dir，脚本从不可变 plan 取出处理前外参，避免错误地把已更新 Parquet 当成初值：
+
+```bash
+/absolute/path/recam_refine_work/runtime/env/bin/python -m recam_refine audit-cameras \
+  /absolute/path/recam_lerobot \
+  --work-dir /absolute/path/recam_refine_work \
+  --report-dir /absolute/path/recam_refine_work/camera_gallery \
+  --episodes 0 3 9 --frames 24 --device cuda:0
+```
+
+打开 `camera_gallery/index.html` 查看相同 RGB 上的 URDF 轮廓、双色点云和指标图。
+每个 episode 的 `metrics.json` 保存实际帧号、相机矩阵、各帧点数、统计口径和输入 SHA-256。
+图像时刻固定选取评估序列的开头、中间、末尾，不根据改善幅度挑图。PNG/PDF 可直接导出。
+中断重跑会校验报告的输入和图片摘要，复用有效结果；输入或设置变化则重新计算。
+
+重新执行全量审计（不重新优化）：
+
+```bash
+/absolute/path/recam_refine_work/runtime/env/bin/python -m recam_refine audit-cameras \
+  /absolute/path/recam_lerobot \
+  --work-dir /absolute/path/recam_refine_work \
+  --report-dir /absolute/path/recam_refine_work/camera_audit \
+  --episodes all --frames 8 --image-frames 0 --workers 4 --device cpu --fail-on-review
+```
+
+只有原始样例、尚未执行 run 时，可提供 `--episode-manifest`、`--pointworld-cameras`，加上 `--fit`。
+这会在 report_dir 试运行两个外部相机的优化、生成比较图，不写回任何源 Parquet/PNG/MP4。
+缺少来源映射、深度或候选时明确报告缺失，不静默省略。`--depth-metadata` 可提供 FS sidecar 内参。
+同一 report_dir 中的试拟合有输入/设置摘要，输入改变时要求换新报告目录，防止误用旧候选。
+
+质量口径详见 [CAMERA_QUALITY.md](CAMERA_QUALITY.md)。**6 cm 的机器人网格深度残差不等于外参平移误差 6 cm**；
+PointWorld 发布代码的 0.10 m 筛选线也不是高精度操作的误差保证。

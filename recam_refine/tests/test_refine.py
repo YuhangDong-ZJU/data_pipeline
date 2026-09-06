@@ -237,6 +237,13 @@ class EndToEndTests(unittest.TestCase):
             (droid/'logs/run.log').write_text('keep this log')
             args=argparse.Namespace(root=root,work_dir=tmp/'work',depth_output=None,depth_chunks='2-13',depth_metadata=[],
                 episode_manifest=manifest,pointworld_cameras=cameras,workers=2,devices='cpu',iterations=1)
+            args.defer_cleanup=True
+            run(args)
+            self.assertTrue(tar_paths[0].exists())
+            self.assertTrue((droid/'logs/run.log').exists())
+            self.assertFalse((tmp/'work/SUCCESS.json').exists())
+            self.assertTrue((tmp/'work/READY_FOR_GEOMETRY_AUDIT.json').exists())
+            args.defer_cleanup=False
             run(args)
             info=read_json(droid/'meta/info.json')
             self.assertEqual(info['total_frames'],12)

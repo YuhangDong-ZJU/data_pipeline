@@ -18,7 +18,7 @@ from .common import (Journal, array_hash, preserved_hashes, check_transform, med
                      sync_dir, write_json, write_jsonl)
 from .inputs import canonical_manifest, download_inputs, load_depth_records
 from .media import assert_same_video_prefix, trim_video, video_info
-from .pointworld import Robot, prepare_assets, refine_camera, release_pose, POINTWORLD_COMMIT, CalibrationRejected
+from .pointworld import Robot, prepare_assets, refine_camera_with_retry, release_pose, POINTWORLD_COMMIT, CalibrationRejected
 from .stats import aggregate, table_stats
 
 
@@ -218,11 +218,11 @@ def calibrate_one(args):
                 # Preserve pixel centers using explicit nearest decimation.
                 depths.append(np.asarray(im, dtype=np.float32)[::2, ::2] / 1000.)
         try:
-            pose, metric = refine_camera(np.asarray(job["initial_extrinsics"][cam]), k, depths, points,
-                                         device=device, iterations=iterations)
+            pose, metric = refine_camera_with_retry(np.asarray(job["initial_extrinsics"][cam]), k, depths, points,
+                                                    device=device, iterations=iterations)
         except CalibrationRejected as exc:
             pose = np.asarray(job["initial_extrinsics"][cam])
-            metric = dict(accepted=False, status="official_initial_retained", reason=str(exc))
+            metric = dict(accepted=False, status="official_initial_retained", reason=str(exc), failed_metrics=exc.metrics)
         poses.append(pose.tolist())
         metrics.append(metric)
     value = dict(episode_index=i, source_episode_id=job["source"]["source_episode_id"],
@@ -594,6 +594,10 @@ def _run_locked(args):
         summaries = [check_subset(s, work / "checks", args.workers, droid=s == droid) for s in subsets]
         write_json(work / "checks.json", summaries)
         finish("06_check")
+    if getattr(args, "defer_cleanup", False):
+        write_json(work / "READY_FOR_GEOMETRY_AUDIT.json", dict(root=str(root), full_decode=True))
+        log("Media and metadata checks complete; awaiting geometry audit before archive/source cleanup.")
+        return
     if not done("07_cleanup"):
         finalize(root, droid, subsets, work)
         finish("07_cleanup")
@@ -610,6 +614,7 @@ def _run_locked(args):
                 backup_directory=str(work / "original"), full_decode=True,
                 all_external_calibrations_accepted=not retained, retained_official_cameras=len(retained)))
     (work / "FAILED.json").unlink(missing_ok=True)
+    (work / "READY_FOR_GEOMETRY_AUDIT.json").unlink(missing_ok=True)
     log(f"COMPLETE: {work / 'SUCCESS.json'}")
     if retained:
         log(f"{len(retained)} camera refinements did not pass geometric acceptance; official initial poses were retained. See retained_official_calibrations.json.")

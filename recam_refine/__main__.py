@@ -49,6 +49,7 @@ def main():
     p.add_argument("--workers", type=int, default=4, help="CPU/I/O processes; default 4 avoids overwhelming shared storage")
     p.add_argument("--devices", default="0,1,2,3,4,5,6,7", help="GPU IDs, e.g. 0,1 or cpu for tests")
     p.add_argument("--iterations", type=int, default=2000)
+    p.add_argument("--defer-cleanup", action="store_true", help="Stop after full media checks so the entry script can audit geometry before cleanup")
     p = sub.add_parser("check", help="Read-only full media decoding and metadata validation")
     p.add_argument("root", type=Path)
     p.add_argument("--report-dir", type=Path, required=True)
@@ -57,6 +58,22 @@ def main():
     p.add_argument("--episode-manifest", type=Path, required=True)
     p.add_argument("--pointworld-cameras", type=Path, required=True)
     p.add_argument("--report", type=Path, required=True)
+    p = sub.add_parser("audit-cameras", help="Read-only PointWorld metric comparison and RGB/point-cloud report")
+    p.add_argument("root", type=Path, help="DROID subset or recam_lerobot root")
+    p.add_argument("--work-dir", type=Path, required=True, help="Pipeline work directory (contains initial plan and poses)")
+    p.add_argument("--report-dir", type=Path, required=True, help="HTML/PNG/JSON output outside the dataset")
+    p.add_argument("--episodes", nargs="+", required=True, help="Episode indices, or all")
+    p.add_argument("--episode-manifest", type=Path)
+    p.add_argument("--pointworld-cameras", type=Path)
+    p.add_argument("--candidate-dir", type=Path, help="Defaults to work-dir/cameras")
+    p.add_argument("--depth-metadata", type=Path, nargs="*", default=[])
+    p.add_argument("--frames", type=int, default=24, help="Evaluation frames outside all fitting/selection frames")
+    p.add_argument("--image-frames", type=int, default=3, help="Representative image frames per episode; 0 for full-dataset metric scans")
+    p.add_argument("--workers", type=int, default=1)
+    p.add_argument("--fail-on-review", action="store_true", help="Return exit code 2 when geometry is unavailable, regresses, or exceeds depth threshold")
+    p.add_argument("--device", default="cuda:0")
+    p.add_argument("--fit", action="store_true", help="Fit both external cameras in report directory without modifying the dataset")
+    p.add_argument("--iterations", type=int, default=2000)
     args = parser.parse_args()
     os.environ.setdefault("OMP_NUM_THREADS", "2")
     if getattr(args, "workers", 1) < 1 or getattr(args, "iterations", 1) < 1:
@@ -89,6 +106,9 @@ def main():
                 details.append(dict(episode_index=row["episode_index"], source_episode_id=row["source_episode_id"], status=status))
             write_json(args.report, dict(counts=dict(counts), episodes=details))
             print(json.dumps(dict(counts)))
+        elif args.command == "audit-cameras":
+            from .audit import run_audit
+            return run_audit(args)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         if args.command == "run" and not args.work_dir.resolve().is_relative_to(args.root.resolve()):

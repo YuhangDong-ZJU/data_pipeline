@@ -21,4 +21,12 @@ PY
 mkdir -p "$WORK_DIR"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
 python3 recam_refine/bootstrap.py "$WORK_DIR" --gpu 2>&1 | tee -a "$WORK_DIR/install.log"
+"$WORK_DIR/runtime/env/bin/python" -m recam_refine run "$DATASET" --work-dir "$WORK_DIR" "$@" --defer-cleanup 2>&1 | tee -a "$WORK_DIR/run.log"
+# Every episode gets the paper's geometric metrics. Detailed image galleries
+# can be generated for chosen episodes with audit-cameras (documented below).
+"$WORK_DIR/runtime/env/bin/python" -m recam_refine audit-cameras "$DATASET" \
+  --work-dir "$WORK_DIR" --report-dir "$WORK_DIR/camera_audit" \
+  --episodes all --frames 8 --image-frames 0 --workers 4 --device cpu --fail-on-review \
+  2>&1 | tee -a "$WORK_DIR/camera_audit.log"
+# All checks passed; replay skips completed stages and only finalizes cleanup.
 "$WORK_DIR/runtime/env/bin/python" -m recam_refine run "$DATASET" --work-dir "$WORK_DIR" "$@" 2>&1 | tee -a "$WORK_DIR/run.log"
