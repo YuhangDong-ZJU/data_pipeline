@@ -74,6 +74,14 @@ def main():
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--fit", action="store_true", help="Fit both external cameras in report directory without modifying the dataset")
     p.add_argument("--iterations", type=int, default=2000)
+    p = sub.add_parser("visualize-fusion", help="Read-only before/after two-view point clouds, PLY and synchronized offline 3D viewer")
+    p.add_argument("root", type=Path)
+    p.add_argument("--metrics", type=Path, required=True, help="An episode's camera audit metrics.json")
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--frame", type=int, help="Audited frame; defaults to the middle representative image frame")
+    p.add_argument("--after", choices=("recam_candidate", "pointworld_release"))
+    p.add_argument("--detail-bounds", type=float, nargs=6, metavar=("XMIN","YMIN","ZMIN","XMAX","YMAX","ZMAX"),
+                   help="Optional shared detail crop in robot-base meters")
     args = parser.parse_args()
     os.environ.setdefault("OMP_NUM_THREADS", "2")
     if getattr(args, "workers", 1) < 1 or getattr(args, "iterations", 1) < 1:
@@ -109,6 +117,9 @@ def main():
         elif args.command == "audit-cameras":
             from .audit import run_audit
             return run_audit(args)
+        elif args.command == "visualize-fusion":
+            from .fusion import run_fusion
+            run_fusion(args)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         if args.command == "run" and not args.work_dir.resolve().is_relative_to(args.root.resolve()):

@@ -161,3 +161,27 @@ simulation 和其他 real_world 子集的原始媒体与标注方法保持原样
 
 质量口径详见 [CAMERA_QUALITY.md](CAMERA_QUALITY.md)。**6 cm 的机器人网格深度残差不等于外参平移误差 6 cm**；
 PointWorld 发布代码的 0.10 m 筛选线也不是高精度操作的误差保证。
+
+### 双视角点云融合：优化前后并排旋转
+
+已有相机审计后，可从任一评估帧生成离线 3D 页面、PNG/PDF 和带 `camera_id` 的 PLY：
+
+```bash
+/absolute/path/recam_refine_work/runtime/env/bin/python -m recam_refine visualize-fusion \
+  /absolute/path/recam_lerobot \
+  --metrics /absolute/path/recam_refine_work/camera_gallery/episode_000009/metrics.json \
+  --output-dir /absolute/path/recam_refine_work/fusion_episode_000009
+```
+
+打开输出的 `index.html`，拖动/缩放会同步左右视角，可切换相机双色和真实 RGB。
+默认取该 episode 的中间代表帧；`--frame` 可指定审计中的其他评估帧。
+`--after pointworld_release` 可查看 PointWorld 发布外参，`--after recam_candidate` 查看本地优化候选。
+两者都有时默认展示本地候选；实际生产数据的最终外参来源应以审计记录为准。
+`--detail-bounds XMIN YMIN ZMIN XMAX YMAX ZMAX` 额外生成指定区域的俯视/侧视放大图，坐标单位为米，原点为机器人基座。
+
+前后使用相同源深度像素和内参，只更换外参。工作空间裁剪按前后成员的并集固定，
+不会靠改变保留点集掩盖偏差；保留机械臂，不做 ICP、平滑或补面。
+固定图的显示范围相同，PLY 保留全部选中的点。
+输入 PNG/MP4 必须与审计记录的 SHA-256 相符，导出后再次核对源文件未改变。
+输出必须位于数据集外，并与审计目录分开。HTML 内嵌 Plotly，不需要网络或额外查看环境。
+换帧、外参版本或局部裁剪时使用新的输出目录，避免混用旧图。
