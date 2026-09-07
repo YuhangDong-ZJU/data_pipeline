@@ -16,7 +16,7 @@ from PIL import Image
 from .archives import check_png, frame_files, unpack_archive
 from .common import (Journal, array_hash, preserved_hashes, check_transform, media_path, parquet_path, read_json,
                      read_jsonl, require, safe_path, set_values, sha256, values,
-                     sync_dir, write_json, write_jsonl)
+                     sync_dir, write_json, write_jsonl, acquire_directory_lock, validate_lock_mount)
 from .inputs import canonical_manifest, download_inputs, load_depth_records
 from .media import assert_same_video_prefix, trim_video, video_info
 from .pointworld import Robot, prepare_assets, refine_camera_with_retry, release_pose, POINTWORLD_COMMIT, CalibrationRejected
@@ -238,11 +238,20 @@ def calibrate_one(args):
     if output.exists():
         return read_json(output)
     i = job["episode_index"]
-    table = pq.read_table(parquet_path(root, info, i)).slice(0, job["length"])
+    expected = job.get('calibration_inputs')
+    if expected:
+        import hashlib
+        import io
+        raw = parquet_path(root,info,i).read_bytes()
+        require(hashlib.sha256(raw).hexdigest()==expected['parquet_sha256'],f'Shard Parquet changed: episode {i}')
+        table = pq.read_table(io.BytesIO(raw)).slice(0,job['length'])
+    else:
+        table = pq.read_table(parquet_path(root, info, i)).slice(0, job["length"])
     joints = values(table["observation.states.joint_state"])
     gripper = values(table["observation.states.gripper_state"]).ravel()
     require(np.isfinite(joints).all() and np.isfinite(gripper).all() and np.all((gripper >= 0) & (gripper <= 1)), f"Invalid robot configuration: {i}")
     indices = np.unique(np.linspace(0, job["length"] - 1, min(16, job["length"]), dtype=int))
+    require(not expected or expected['frames']==indices.tolist(),'Shard frame selection changed')
     robot = calibration_robot(urdf)
     points = [robot.points(joints[t], gripper[t]) for t in indices]
     poses, metrics = [], []
@@ -253,8 +262,14 @@ def calibrate_one(args):
             k = np.asarray(rec["intrinsic"])
         k[:2] *= .5
         depths = []
-        for t in indices:
-            with Image.open(media_path(root, info, i, f"observation.images.depth_{cam:02d}", int(t))) as im:
+        for index,t in enumerate(indices):
+            path = media_path(root, info, i, f"observation.images.depth_{cam:02d}", int(t))
+            if expected:
+                raw = path.read_bytes()
+                require(hashlib.sha256(raw).hexdigest()==expected['depth_sha256'][str(cam)][index],
+                        f'Shard depth changed: episode {i} camera {cam} frame {t}')
+                path = io.BytesIO(raw)
+            with Image.open(path) as im:
                 # Preserve pixel centers using explicit nearest decimation.
                 depths.append(np.asarray(im, dtype=np.float32)[::2, ::2] / 1000.)
         try:
@@ -482,12 +497,13 @@ def run(args):
     require(root.is_dir(), f"Missing dataset root: {root}")
     require(not work.is_relative_to(root) and not root.is_relative_to(work), "work-dir must be outside and separate from recam_lerobot")
     work.mkdir(parents=True, exist_ok=True)
+    validate_lock_mount(work)
     with (work / "run.lock").open("a+") as lock:
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         try:
             try:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquire_directory_lock(fd, fcntl.LOCK_EX)
             except BlockingIOError:
                 raise RuntimeError("Another refinement is using this dataset or work directory")
             _run_locked(args)

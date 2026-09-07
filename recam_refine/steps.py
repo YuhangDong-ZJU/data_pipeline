@@ -9,7 +9,8 @@ import hashlib
 import json
 from concurrent.futures import ProcessPoolExecutor
 
-from .common import require, read_json, read_jsonl, write_json, sha256, media_path, parquet_path
+from .common import (require, read_json, read_jsonl, write_json, sha256, media_path, parquet_path,
+                     acquire_directory_lock, validate_lock_mount)
 from .inputs import canonical_manifest, download_manifest
 
 
@@ -52,12 +53,13 @@ def transfer_only(args):
     droid = root/'real_world/droid'
     require(droid.is_dir(), f'Expected {droid}')
     work.mkdir(parents=True,exist_ok=True)
+    validate_lock_mount(work)
     with (work/'run.lock').open('a+') as lock:
         fd = os.open(root,os.O_RDONLY|os.O_DIRECTORY)
         try:
             try:
                 fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                acquire_directory_lock(fd,fcntl.LOCK_EX)
             except BlockingIOError:
                 raise RuntimeError('Another refinement is using this dataset or work directory')
             manual_workflow(root,work)
@@ -115,12 +117,13 @@ def locked_step(root,work):
     require(root.is_dir() and (root/'real_world/droid').is_dir(),f'Missing recam_lerobot/real_world/droid: {root}')
     require(not work.is_relative_to(root) and not root.is_relative_to(work),'work-dir must be separate from the dataset')
     work.mkdir(parents=True,exist_ok=True)
+    validate_lock_mount(work)
     with (work/'run.lock').open('a+') as lock:
         fd = os.open(root,os.O_RDONLY|os.O_DIRECTORY)
         try:
             try:
                 fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-                fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                acquire_directory_lock(fd,fcntl.LOCK_EX)
             except BlockingIOError:
                 raise RuntimeError('Another refinement is using this dataset or work directory')
             manual_workflow(root,work)
@@ -230,6 +233,7 @@ def camera_inputs(root,work,args):
 def refine_only(root,work,args):
     from .calibration import run_calibrations, select_backend
     from .pointworld import prepare_assets, BATCHED_BACKEND_VERSION
+    require(not (work/'step_settings/shard-plan.json').exists(),'Sharded refinement is selected; use shard-refine and shard-merge')
     droid = root/'real_world/droid'
     entries,camera_dir = camera_inputs(root,work,args)
     saved_path = work/'step_settings/refine.json'
@@ -257,6 +261,10 @@ def refine_only(root,work,args):
     if pending:
         urdf = prepare_assets(work/'pointworld')
         run_calibrations(droid,info,pending,urdf,work,args,backend)
+    return refinement_result(work,jobs)
+
+
+def refinement_result(work,jobs):
     retained = []
     for job in jobs:
         camera = read_json(work/'cameras'/f'episode_{job["episode_index"]:06d}.json')
@@ -355,6 +363,9 @@ def cleanup_only(root,work,args,subsets):
 def run_step(args):
     from .pipeline import discover
     root,work = args.root.resolve(),args.work_dir.resolve()
+    if args.step.startswith('shard-'):
+        from .shards import run_shard_step
+        return run_shard_step(args)
     if args.step=='status':
         print(json.dumps({stage:(work/name).exists() for stage,name in MARKERS.items()},indent=2),flush=True)
         return

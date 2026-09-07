@@ -122,6 +122,10 @@ def prepare_tasks(tasks):
                 points = [w['robot'].points(joints[t],gripper[t]) for t in frames]
                 episodes[i] = (hashlib.sha256(raw).hexdigest(), frames, points)
             parquet_hash,frames,points = episodes[i]
+            expected = job.get('calibration_inputs')
+            if expected:
+                require(expected['frames']==frames and expected['parquet_sha256']==parquet_hash,
+                        f'Shard Parquet/frame inputs changed: episode {i}')
             k = np.asarray(job['initial_intrinsics'][cam],dtype=np.float64).copy()
             record = job['depths'][str(cam)]['record']
             if record:
@@ -133,6 +137,8 @@ def prepare_tasks(tasks):
                 hashes.append(hashlib.sha256(raw).hexdigest())
                 with Image.open(io.BytesIO(raw)) as im:
                     depths.append(np.asarray(im,dtype=np.float32)[::2,::2]/1000.)
+            if expected:
+                require(expected['depth_sha256'][str(cam)]==hashes,f'Shard depth inputs changed: episode {i} camera {cam}')
             data = dict(initial=np.asarray(job['initial_extrinsics'][cam]), k=k, depths=depths, points=points)
             identity = dict(backend=BACKEND_VERSION, iterations=w['iterations'], pointworld_commit=POINTWORLD_COMMIT,
                             episode=i, source=job['source'], camera=cam, frames=frames, parquet=parquet_hash,
@@ -263,11 +269,21 @@ def process_batch(tasks, next_tasks):
                 effective_camera_limit=w['batch_size'],peak_allocated_gib=torch.cuda.max_memory_allocated(w['device'])/2**30)
 
 
-def _run_reference(root, info, pending, urdf, devices, iterations):
+def progress(args,completed,total,errors,start):
+    path = getattr(args,'calibration_progress_file',None)
+    if path:
+        context = getattr(args,'calibration_progress_context',{})
+        write_json(path,{**context,'status':'computing','completed':completed+context.get('cached_episodes',0),
+                         'total':total+context.get('cached_episodes',0),'errors':len(errors),
+                         'elapsed_seconds':time.perf_counter()-start,'updated_unix_seconds':time.time()})
+
+
+def _run_reference(root, info, pending, urdf, devices, iterations,args=None):
     from .pipeline import calibrate_one
     queues = deque(pending)
     pools = [ProcessPoolExecutor(max_workers=1,mp_context=get_context('spawn')) for _ in devices]
     active,errors = {},[]
+    start = time.perf_counter()
     def submit(slot):
         if queues:
             job,output = queues.popleft()
@@ -286,6 +302,7 @@ def _run_reference(root, info, pending, urdf, devices, iterations):
                     errors.append(dict(episode_index=i,error=str(exc)))
                 completed += 1
                 print(f'Calibrate {completed}/{len(pending)}',flush=True)
+                progress(args,completed,len(pending),errors,start)
                 submit(slot)
     finally:
         for pool in pools:
@@ -301,7 +318,7 @@ def run_calibrations(root, info, pending, urdf, work, args, backend):
             'Unavailable GPU; check --devices and CUDA_VISIBLE_DEVICES')
     devices = ['cpu' if d == 'cpu' else 'cuda:'+d for d in devices]
     if backend == 'reference':
-        errors = _run_reference(root,info,pending,urdf,devices,args.iterations)
+        errors = _run_reference(root,info,pending,urdf,devices,args.iterations,args)
     else:
         errors = _run_batched(root,info,pending,urdf,work,args,devices)
     write_json(Path(work)/'calibration_failures.json',errors)
@@ -325,6 +342,7 @@ def _run_batched(root, info, pending, urdf, work, args, devices):
     active,reserved,errors,finished = {},{},[],{}
     outputs = {j['episode_index']:Path(p) for j,p in pending}
     start = time.perf_counter()
+    progress(args,0,len(pending),errors,start)
     def take(capacity):
         # Prefer full batches, including retry cameras from different episodes.
         sizes = [(len(q),age) for age,q in queues.items() if q]
@@ -382,6 +400,7 @@ def _run_batched(root, info, pending, urdf, work, args, devices):
                     errors.extend(dict(episode_index=t['job']['episode_index'],camera=t['cam'],error=str(exc)) for t in current)
                 following = reserved.pop(slot,[])
                 submit(slot,following)
+                progress(args,completed,len(pending),errors,start)
             # A GPU that drained its queue can take continuations produced later.
             busy = {slot for slot,_ in active.values()}
             for slot in range(len(pools)):

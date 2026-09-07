@@ -53,6 +53,12 @@ def calibration_options(parser):
                         help='Use eager batched GPU execution; same inputs, budget and quality gates')
 
 
+class ExplicitIterations(argparse.Action):
+    def __call__(self,parser,namespace,values,option_string=None):
+        setattr(namespace,self.dest,values)
+        namespace.iterations_explicit = True
+
+
 def main():
     parser = argparse.ArgumentParser(description="Recover, align, refine and fully check ReCam LeRobot datasets.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -78,7 +84,8 @@ def main():
     p.add_argument('--depth-chunks',default='2-13')
     p.add_argument('--episode-manifest',type=Path)
     p = sub.add_parser('run-step',help='Run exactly one manual stage, then stop')
-    p.add_argument('step',choices=('unpack','align','overlap','refine','apply','check','cleanup','status'))
+    p.add_argument('step',choices=('unpack','align','overlap','refine','apply','check','cleanup','status',
+                                  'shard-plan','shard-refine','shard-merge','shard-status'))
     p.add_argument('root',type=Path)
     p.add_argument('--work-dir',type=Path,required=True)
     p.add_argument('--episode-manifest',type=Path)
@@ -86,9 +93,12 @@ def main():
     p.add_argument('--pointworld-cameras',type=Path)
     p.add_argument('--workers',type=int,default=4)
     p.add_argument('--devices',default='0,1,2,3,4,5,6,7')
-    p.add_argument('--iterations',type=int,default=2000)
+    p.add_argument('--iterations',type=int,default=2000,action=ExplicitIterations)
     calibration_options(p)
     p.add_argument('--audit-frames',type=int,default=8)
+    p.add_argument('--num-shards',type=int,help='shard-plan: number of fixed episode partitions')
+    p.add_argument('--shard-id',type=int,help='shard-refine: zero-based partition to compute')
+    p.add_argument('--worker-work-dir',type=Path,help='shard-refine: separate per-machine runtime/checkpoint directory')
     p = sub.add_parser("check", help="Read-only full media decoding and metadata validation")
     p.add_argument("root", type=Path)
     p.add_argument("--report-dir", type=Path, required=True)

@@ -40,6 +40,15 @@ def main():
         parser.error("Runtime installer supports Linux x86_64 (including Debian 12).")
     root = args.work_dir.expanduser().resolve() / "runtime"
     root.mkdir(parents=True, exist_ok=True)
+    # Serialize installation even when two hosts request status or launch the
+    # same worker directory before the workflow-level lock has been acquired.
+    import fcntl
+    with (root / 'bootstrap.lock').open('a+') as lock:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        install(root,args.gpu)
+
+
+def install(root,gpu):
     env = os.environ.copy()
     for name in ("PYTHONHOME", "PYTHONPATH", "LD_PRELOAD", "LD_LIBRARY_PATH"):
         env.pop(name, None)
@@ -68,13 +77,13 @@ def main():
     python = venv / "bin/python"
     if not python.exists():
         run(uv, "venv", "--python", PYTHON_VERSION, venv)
-    req = Path(__file__).with_name("requirements-gpu.lock" if args.gpu else "requirements.lock")
+    req = Path(__file__).with_name("requirements-gpu.lock" if gpu else "requirements.lock")
     if not req.exists():
         raise RuntimeError(f"Incomplete checkout: missing {req}")
     run(uv, "pip", "install", "--python", python, "--only-binary", ":all:",
         "--require-hashes", "--index-strategy", "unsafe-best-match", "-r", req)
     run(uv, "pip", "check", "--python", python)
-    run(python, "-m", "recam_refine", "doctor", *( ["--gpu"] if args.gpu else [] ))
+    run(python, "-m", "recam_refine", "doctor", *( ["--gpu"] if gpu else [] ))
     print(f"Ready: {python}", flush=True)
 
 

@@ -28,6 +28,10 @@
 默认自动按空闲显存选择批量，可失败续跑到总计 6,000 次并保存 Adam 状态。
 使用方式见逐步文档的 4b，速度与质量验证见 **[PERFORMANCE.md](PERFORMANCE.md)**。
 
+两台机器共享数据时，4b 可改为固定分片、多机并行和主机合并：
+`shard-plan → shard-refine → shard-merge`。两边共享同一协调目录，各自使用独立运行环境和断点目录；
+后续仍手动 `apply → check → cleanup`。完整命令见 **[MULTI_MACHINE.md](MULTI_MACHINE.md)**。
+
 ## 自动模式兼容入口（使用独立 work_dir）
 
 下面是保留的整套自动执行方式。按上述逐步流程操作时，使用 `run_step.sh`，

@@ -163,6 +163,13 @@ tail -f "$RECAM_WORK/step_refine.log"
 对选定 episode 生成优化前后比较。审计从不可变 plan 读取原外参，从 `cameras/` 读取候选，
 因此无需先写回。质量口径见 [CAMERA_QUALITY.md](CAMERA_QUALITY.md)。
 
+### 4b 的多机替代方式
+
+如果两台机器共享数据目录，在开始单机 `refine` 前改用
+**[MULTI_MACHINE.md](MULTI_MACHINE.md)** 的 `shard-plan → shard-refine → shard-merge`。
+两个分片只读数据、分别计算候选；主机确认全量覆盖并合并后，才产生相同的 `STEP4_REFINE_SUCCESS.json`。
+两台机器共享原 `RECAM_WORK`，各自使用独立 worker 目录。不要同时运行单机和分片 refine。
+
 ## 4c. 明确写回候选外参
 
 ```bash

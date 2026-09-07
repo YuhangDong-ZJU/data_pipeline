@@ -14,7 +14,7 @@ import pyarrow.parquet as pq
 from PIL import Image, ImageDraw, ImageFont
 
 from .common import (require, read_json, read_jsonl, write_json, values, sha256,
-                     check_transform, media_path, parquet_path, array_hash)
+                     check_transform, media_path, parquet_path, array_hash, acquire_directory_lock, validate_lock_mount)
 from .geometry_metrics import (robot_mask, scene_cloud, cloud_matches, aggregate_matches,
                                aggregate_depth, contour_overlay, WORKSPACE_MIN, WORKSPACE_MAX)
 from .inputs import load_depth_records
@@ -372,14 +372,16 @@ def run_audit(args):
     require(not work.is_relative_to(root) and not out.is_relative_to(root), "Audit work/report must be outside the dataset")
     work.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
+    validate_lock_mount(work)
+    validate_lock_mount(out)
     with ExitStack() as stack:
         run_lock = stack.enter_context((work / "run.lock").open("a+"))
         report_lock = stack.enter_context((out / "audit.lock").open("a+"))
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         stack.callback(os.close, fd)
         try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             fcntl.flock(run_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            acquire_directory_lock(fd, fcntl.LOCK_SH)
             fcntl.flock(report_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError("Dataset refinement or another writer is using this audit report") from exc
