@@ -1,5 +1,25 @@
 # 验证记录（2026-09-06）
 
+## 2026-09-08：已有环境自动补装缺项
+
+- 对照 trim、NormalCrafter、download 的安装脚本和固定上游 requirements，记录各环境的声明依赖缺口，
+  见 [REUSE_ENVIRONMENTS.md](REUSE_ENVIRONMENTS.md)。只读查询示例服务器已有 Conda 环境以区分配置与实际安装。
+- 58 项单元测试通过；新增测试覆盖：已安装包版本约束、Torch/Python 不替换、拒绝修改旧包的解析计划、
+  wheel SHA-256、安装目标隔离、无 pip 的独立安装工具、共享读锁/排他安装锁及系统 Python 拒绝。
+- 在 Python 3.10.20 的独立 venv 中只读继承原 `droid_normals` 包：开启 `--check-only` 时完全不安装，
+  自动补装时只新增 trimesh 4.6.4、pycollada 0.9.2、zstandard 0.23.0，全部已有包版本保持不变。
+  原 Conda 环境和原始 DROID/simulation 数据未改动。
+- 在另一套 Python 3.11.11、没有 pip 的独立 venv 中模拟媒体依赖已安装、几何依赖缺失的环境：
+  自动增加上述三包及缺失的 python-dateutil、six；安装工具只放在工作目录，没有向 venv 安装/升级 pip。
+- 两套环境均先缓存 wheel，再禁用网络运行真实环境入口：只读检查、解析并安装缺包、16 位 PNG、
+  Parquet、H.264、确定性机器人网格采样均通过；再次执行不使用安装源，旧包版本仍一致。
+- 双 worker 的 Bash/CLI 分片、合并、显式 apply 和未 check 禁止 cleanup 测试通过；运行期 managed runtime
+  读锁保护通过。现有 Torch 2.8.0+cu129 在两张 RTX 4090 上通过实际 CUDA 和批量 CUDA Graph 检查。
+- Ruff、Python/Bash 语法检查通过。Debian 12 CI 增加真实缺依赖补装测试。
+
+测试环境均为一次性临时目录，不代表已经检测对方 H100 节点的包清单、权限或网络状况。
+缺包允许补装，已有包冲突或动态库错误仍需明确诊断；不会借补装之名重装整个环境或降低数据验收门槛。
+
 ## 2026-09-07：直接复用已有环境，不安装依赖
 
 - `run_step.sh --reuse-env` / `RECAM_REFINE_REUSE_ENV=1` 支持自动发现既有 Conda 环境，

@@ -1,7 +1,7 @@
 # 将 CPU 阶段与 GPU 阶段分开执行
 
 **机器已有环境时，先看 [复用已有环境](REUSE_ENVIRONMENTS.md)。** 设置 `RECAM_REFINE_REUSE_ENV=1` 后，
-下列逐步处理命令使用已有环境；第 2 节的安装命令改为该文档中的环境检查，GPU 命令去掉 `--runtime-work-dir`。
+下列逐步处理命令使用已有环境；第 2 节的安装命令改为该文档中的检查及缺项补装，GPU 命令去掉 `--runtime-work-dir`。
 本页保留原独立 runtime 方案供已经按该方案启动的作业使用。
 
 GPU 机器只运行 `shard-refine`；其余阶段由 CPU 协调机完成。每次选择执行一步，成功后再继续。

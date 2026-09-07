@@ -1,4 +1,4 @@
-"""Discover and run existing environments without installing any packages."""
+"""Reuse existing environments and add missing dependencies without replacing installed packages."""
 from __future__ import annotations
 
 import argparse
@@ -33,14 +33,7 @@ def environment(python, cache):
     return env
 
 
-def probe(profile):
-    """Offline capability checks, performed by the candidate interpreter."""
-    import importlib
-    import importlib.metadata as metadata
-    import platform
-
-    if sys.version_info[:2] not in ((3, 10), (3, 11)):
-        raise RuntimeError('Supported existing environments use Python 3.10 or 3.11')
+def profile_packages(profile):
     packages = dict(BASE)
     if profile != 'base':
         packages['zstandard'] = 'zstandard'
@@ -50,6 +43,18 @@ def probe(profile):
         packages['matplotlib'] = 'matplotlib'
     if profile in ('cpu', 'gpu', 'prepare-gpu'):
         packages['torch'] = 'torch'
+    return packages
+
+
+def probe(profile):
+    """Offline capability checks, performed by the candidate interpreter."""
+    import importlib
+    import importlib.metadata as metadata
+    import platform
+
+    if sys.version_info[:2] not in ((3, 10), (3, 11)):
+        raise RuntimeError('Supported existing environments use Python 3.10 or 3.11')
+    packages = profile_packages(profile)
     versions, errors = {}, []
     for name, module in packages.items():
         try:
@@ -163,33 +168,85 @@ def candidates(work, profile, python=None, conda_env=None):
     return list(dict.fromkeys(os.path.abspath(p) for p in paths))
 
 
-def select(work, profile, cache, python=None, conda_env=None, leases=None):
-    failures = []
+def select(work, profile, cache, python=None, conda_env=None, leases=None, install_missing=True):
+    from recam_refine.dependencies import environment_lease, inventory, missing_requirements, supplement
+    failures, repairable = [], []
+    packages = profile_packages(profile)
+
+    def check(candidate, fds):
+        result = subprocess.run([candidate, '-m', 'recam_refine.environment', '--probe', profile],
+                                env=environment(candidate, cache), capture_output=True, text=True, timeout=180,
+                                pass_fds=fds)
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip())
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def locks(trial, candidate, snapshot, exclusive=False):
+        held = [trial.enter_context(environment_lease(work, snapshot['prefix'], exclusive))]
+        runtime = Path(candidate).parent.parent.resolve().parent
+        if (runtime / 'bootstrap.lock').is_file():
+            from recam_refine.bootstrap import runtime_lock
+            held.append(trial.enter_context(runtime_lock(runtime, read_only=not exclusive)))
+        return held
+
     for candidate in candidates(work, profile, python, conda_env):
         if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
             failures.append(f'{candidate}: executable not found')
             continue
         try:
             with ExitStack() as trial:
-                fds = ()
-                runtime = Path(candidate).parent.parent.resolve().parent
-                if (runtime / 'bootstrap.lock').is_file():
-                    from recam_refine.bootstrap import runtime_lock
-                    lock = trial.enter_context(runtime_lock(runtime, read_only=True))
-                    fds = (lock.fileno(),)
-                result = subprocess.run([candidate, '-m', 'recam_refine.environment', '--probe', profile],
-                                        env=environment(candidate, cache), capture_output=True, text=True, timeout=180,
-                                        pass_fds=fds)
-                if result.returncode == 0:
-                    report = json.loads(result.stdout.strip().splitlines()[-1])
+                snapshot = inventory(candidate, environment(candidate, cache), packages)
+                held = locks(trial, candidate, snapshot)
+                fds = tuple(lock.fileno() for lock in held)
+                try:
+                    report = check(candidate, fds)
                     if leases is not None:
                         leases.enter_context(trial.pop_all())
                     return candidate, report, fds if leases is not None else ()
-                failures.append(f'{candidate}: {result.stderr.strip() or result.stdout.strip()}')
+                except RuntimeError as exc:
+                    failures.append(f'{candidate}: {exc}')
+                    missing = missing_requirements(snapshot, packages, profile)
+                    absent = set(missing) | set(snapshot.get('missing_transitive', []))
+                    if absent:
+                        prefix = Path(snapshot['prefix'])
+                        if (snapshot['prefix'] == snapshot['base_prefix'] and
+                                not (prefix / 'conda-meta').is_dir()):
+                            failures.append(f'{candidate}: system Python will not be modified')
+                            continue
+                        if not os.access(snapshot['purelib'], os.W_OK):
+                            failures.append(f'{candidate}: environment is not writable')
+                            continue
+                        # Prefer adding small dependencies to an installed Torch
+                        # environment over downloading Torch into a minimal env.
+                        score = len(absent) + (1000 if 'torch' in missing else 0)
+                        repairable.append((score, len(repairable), candidate))
+                        print(f'EXISTING ENVIRONMENT: {candidate}; missing: {", ".join(sorted(absent))}', flush=True)
         except subprocess.TimeoutExpired:
             failures.append(f'{candidate}: environment check timed out')
-        except RuntimeError as exc:
+        except (RuntimeError, subprocess.CalledProcessError) as exc:
             failures.append(f'{candidate}: {exc}')
+    if install_missing and repairable:
+        # Select once. Never mutate several environments when one repair fails.
+        candidate = sorted(repairable)[0][2]
+        with ExitStack() as trial:
+            env = environment(candidate, cache)
+            snapshot = inventory(candidate, env, packages)
+            held = locks(trial, candidate, snapshot, exclusive=True)
+            fds = tuple(lock.fileno() for lock in held)
+            # Another installer may have completed since the first probe.
+            snapshot = inventory(candidate, env, packages)
+            try:
+                report = check(candidate, fds)
+            except RuntimeError:
+                addition = supplement(candidate, snapshot, packages, profile, cache, env)
+                report = check(candidate, fds)
+                report['supplement'] = addition
+            import fcntl
+            for lock in held:
+                fcntl.flock(lock, fcntl.LOCK_SH)
+            if leases is not None:
+                leases.enter_context(trial.pop_all())
+            return candidate, report, fds if leases is not None else ()
     raise RuntimeError('No compatible existing environment. No installation or upgrade was attempted.\n' +
                        '\n'.join(failures) + '\nSelect another installed environment with --python or --conda-env.')
 
@@ -217,6 +274,7 @@ def main():
     selector.add_argument('--python', default=os.environ.get('RECAM_REFINE_PYTHON'))
     selector.add_argument('--conda-env', default=os.environ.get('RECAM_REFINE_ENV_NAME'))
     parser.add_argument('--cache-work-dir', type=Path)
+    parser.add_argument('--check-only', action='store_true', help='Report missing dependencies without installing')
     parser.add_argument('--probe', choices=PROFILES, help=argparse.SUPPRESS)
     parser.add_argument('--exec', dest='command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -233,11 +291,13 @@ def main():
         for folder in ('xdg', 'matplotlib', 'cuda', 'triton', 'torchinductor', 'torch_extensions'):
             (cache / folder).mkdir(parents=True, exist_ok=True)
         with ExitStack() as leases:
-            python, report, fds = select(work, args.profile, cache, args.python, args.conda_env, leases)
+            python, report, fds = select(work, args.profile, cache, args.python, args.conda_env, leases,
+                                         install_missing=not args.check_only)
             if args.profile == 'gpu':
                 freeze_gpu(work, report)
             (cache / f'environment_{args.profile}.json').write_text(json.dumps(report, indent=2) + '\n')
-            print(f'REUSING EXISTING ENVIRONMENT: {python}\nNo packages installed or upgraded.', flush=True)
+            note = 'Missing dependencies installed; existing versions preserved.' if 'supplement' in report else 'No packages installed or upgraded.'
+            print(f'REUSING EXISTING ENVIRONMENT: {python}\n{note}', flush=True)
             print(json.dumps(report, indent=2), flush=True)
             if args.command:
                 return subprocess.run([python, *args.command], env=environment(python, cache), pass_fds=fds).returncode

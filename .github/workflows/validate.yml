@@ -38,6 +38,8 @@ jobs:
         run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_manual_entry --runtime-work-dir /tmp/recam-refine-ci --cpu-check
       - name: Reuse an existing Python with networking disabled
         run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_existing_environment --python /tmp/recam-refine-ci/runtime/env/bin/python
+      - name: Add only missing dependencies to a disposable existing environment
+        run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_dependency_supplement
       - name: Exercise two workers reusing an existing environment
         run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_shard_entry --runtime-work-dir /tmp/recam-refine-ci --reuse-env
       - name: Exercise shared-data shard Bash and CLI stages
