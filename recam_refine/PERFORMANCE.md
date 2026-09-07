@@ -1,5 +1,8 @@
 # GPU 批量外参优化（2026-09-07）
 
+当前环境已更新为 PyTorch 2.8.0+cu129。本文原有计时来自下文标明的 2.5.1+cu124 环境，保留为历史测量，
+不能直接作为新版在 H100 上的速度保证。版本升级验证见 [VALIDATION.md](VALIDATION.md)。
+
 此版本改进 `refine` 的执行效率。各功能仍分步执行；候选写到 work_dir，`apply` 才写回外参。
 没有重新运行 FoundationStereo 或 NormalCrafter，也没有处理 wrist depth/normal。
 

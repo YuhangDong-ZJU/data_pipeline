@@ -42,5 +42,7 @@ jobs:
         run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_shard_entry --runtime-work-dir /tmp/recam-refine-ci --shared-runtime
       - name: Verify runtime stays protected throughout child execution
         run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_runtime_entry --runtime-work-dir /tmp/recam-refine-ci
+      - name: Reject replacing an existing GPU Torch build
+        run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_torch_version --runtime-work-dir /tmp/recam-refine-ci
       - name: Lint refinement code
         run: /tmp/recam-refine-ci/runtime/uv tool run ruff==0.12.10 check recam_refine

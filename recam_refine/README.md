@@ -31,7 +31,7 @@ CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行
 使用方式见逐步文档的 4b，速度与质量验证见 **[PERFORMANCE.md](PERFORMANCE.md)**。
 
 两台机器共享数据时，4b 可改为固定分片、多机并行和主机合并：
-`shard-plan → shard-refine → shard-merge`。两边共享同一协调目录，各自使用独立运行环境和断点目录；
+`shard-plan → shard-refine → shard-merge`。两边共享同一协调目录和预装 GPU 环境，各自使用独立断点目录；
 后续仍手动 `apply → check → cleanup`。完整命令见 **[MULTI_MACHINE.md](MULTI_MACHINE.md)**。
 
 ## 自动模式兼容入口（使用独立 work_dir）
@@ -87,9 +87,11 @@ bash recam_refine/run_refine.sh \
 
 - 安装器用系统 `python3` 的标准库下载并校验固定版本 uv；在 work_dir 中安装 CPython **3.11.11**。
 - CPU 和 GPU 依赖分别固定在 `requirements.lock` / `requirements-gpu.lock`，安装时校验 SHA-256，只接受 wheel。
-- PyTorch **2.5.1 + CUDA 12.4** 自带 CUDA 用户态运行库，支持 H100 的 `sm_90`；系统只需可用的 NVIDIA 驱动。
+- GPU 环境锁定 **PyTorch 2.8.0+cu129（CUDA 12.9）**，CPU 检查环境使用 **2.8.0+cpu**。
+  CUDA 用户态运行库随依赖安装；H100 节点需要兼容的 NVIDIA 驱动。版本来源见 [PyTorch 官方安装表](https://pytorch.org/get-started/previous-versions/#v280)。
 - 安装后检查 PyAV/libx264、Parquet，并在每张可见 GPU 上执行实际优化所需的 `grid_sample` 前向/反向。
-- 不改系统 Python、CUDA、驱动或已有 Conda 环境。建议 work_dir 为运行环境预留约 10 GB，另加处理备份空间。
+- 不改系统 Python、CUDA、驱动或已有 Conda 环境。共享 GPU 环境连同下载缓存建议预留 25 GB，另加处理备份空间。
+- 安装器拒绝原地替换不同版本的已有 GPU Torch。升级时新建共享环境目录；已开始的外参优化保留原版本恢复，不中途切换。
 - 首次运行需要访问 GitHub、PyPI、PyTorch wheel 源和 Hugging Face。网络不可用时明确退出；重跑会复用下载缓存。
 
 脚本自动下载两个小型输入，**不会下载 PointWorld 的 TB 级 flow 数据或重新下载 SVO**：

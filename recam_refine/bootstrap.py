@@ -119,6 +119,16 @@ def install(root,gpu=False,prepare_gpu=False,cpu_torch=False,verify_only=False):
     req = Path(__file__).with_name(name)
     if not req.exists():
         raise RuntimeError(f"Incomplete checkout: missing {req}")
+    if not verify_only and (gpu or prepare_gpu):
+        # A new Torch/CUDA build may change optimizer numerics. Do not silently
+        # replace an existing calibration runtime when the checkout is updated.
+        wanted = re.search(r'^torch==([^\s\\]+)',req.read_text(),re.M).group(1)
+        existing = subprocess.check_output([str(python),'-c',
+            "import importlib.metadata as m; print(next((d.version for d in m.distributions() "
+            "if d.metadata.get('Name','').lower()=='torch'),'missing'))"],env=env,text=True).strip()
+        if existing not in ('missing',wanted,wanted.split('+')[0]+'+cpu'):
+            raise RuntimeError(f'Existing runtime has torch {existing}; requested {wanted}. '
+                               'Preserve it for existing jobs and prepare a NEW runtime work directory.')
     if not verify_only:
         run(uv, "pip", "install", "--python", python, "--only-binary", ":all:",
             "--require-hashes", "--index-strategy", "unsafe-best-match", "-r", req)

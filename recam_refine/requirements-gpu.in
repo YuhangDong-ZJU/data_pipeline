@@ -1,2 +1,2 @@
 -r requirements.txt
-torch==2.5.1+cu124
+torch==2.8.0+cu129

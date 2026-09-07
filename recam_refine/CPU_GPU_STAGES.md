@@ -34,7 +34,7 @@ export REPO_DIR=/shared/data_pipeline
 export RECAM_ROOT=/shared/recam_lerobot
 export RECAM_WORK=/shared/recam_refine_work
 export DEPTH_OUTPUT=/shared/droid_depth_output
-export GPU_RUNTIME=/shared/recam_gpu_runtime
+export GPU_RUNTIME=/shared/recam_gpu_runtime_torch28
 export WORKER_A=/shared/recam_workers/shard_0
 export WORKER_B=/shared/recam_workers/shard_1
 cd "$REPO_DIR"
@@ -98,11 +98,14 @@ python3 recam_refine/bootstrap.py "$RECAM_WORK" --cpu-torch
 python3 recam_refine/bootstrap.py "$GPU_RUNTIME" --prepare-gpu
 ```
 
-`--prepare-gpu` 下载锁定的 PyTorch/CUDA 用户态依赖，在 CPU 上检查导入和数值运算，
+`--prepare-gpu` 安装锁定的 **PyTorch 2.8.0+cu129 / CUDA 12.9**，在 CPU 上检查导入和数值运算，
 不要求 CPU 机器有 NVIDIA 驱动。无需修改系统 CUDA、Conda 或安装 nvcc。
 它不能预先证明 GPU 节点的驱动可用；下一阶段会用实际 GPU 验证。
-两台 GPU 共用 `$GPU_RUNTIME/runtime/env/bin/python`，CPU 检查环境继续独立，避免替换 GPU 版 Torch。
+两台 GPU 共用 `$GPU_RUNTIME/runtime/env/bin/python`，CPU 检查环境使用独立的 **2.8.0+cpu**。
 以上两条命令全部成功、`SHARD_PLAN_READY.json` 已生成后，再启动或申请 GPU 节点。
+
+若之前准备过 2.5.1 GPU 环境，保留原目录，使用这里新命名的 `GPU_RUNTIME`；安装器拒绝原地替换不同版本的 GPU Torch。
+本次环境适用于尚未开始外参优化的流程。已经用 2.5.1 开始优化的作业，应保留原代码/环境恢复，避免跨版本续接 Adam 断点或混合候选。
 
 ## 3. GPU：只运行优化
 
