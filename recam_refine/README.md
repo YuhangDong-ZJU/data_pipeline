@@ -20,9 +20,11 @@ CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行
 | 4c | `apply` | 显式写回上一步外参候选，并同步 metadata/stats |
 | 5a | `check` | 全部媒体完整解码、metadata 检查、全 episode 独立帧几何审计 |
 | 5b | `cleanup` | 确认检查后数据未变，再删除 DROID TAR/跨盘源副本、移出日志等辅助内容 |
+| 6（可选） | `repack` | 校验和整理通过后，将 DROID 两个外部相机的最终 depth PNG 重新打包并逐文件核验；保留 PNG |
 
 每步都有独立日志和完成标志；中断后使用相同命令和 work_dir 恢复。
 `status` 查看完成状态。没有前一步完成记录时拒绝跳步；不会自动运行下一步。
+发布用 depth TAR 的独立命令和校验规则见 [重新打包说明](REPACK_DEPTH.md)。
 第一步只安装 CPU 环境，不依赖 normal 或 PointWorld。
 可以在 4b 后使用本文后面的审计与点云命令先看候选，再选择何时执行 4c。
 

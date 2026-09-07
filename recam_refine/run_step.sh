@@ -5,7 +5,7 @@ unset PYTHONHOME PYTHONPATH LD_PRELOAD LD_LIBRARY_PATH
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 if [[ $# -lt 3 ]]; then
-  echo 'Usage: bash recam_refine/run_step.sh <transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|status> <recam_lerobot> <work_dir> [--prepared-runtime] [--runtime-work-dir SHARED_ENV (shard-refine only)] [options]' >&2
+  echo 'Usage: bash recam_refine/run_step.sh <transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|repack|status> <recam_lerobot> <work_dir> [--prepared-runtime] [--runtime-work-dir SHARED_ENV (shard-refine only)] [options]' >&2
   exit 2
 fi
 STEP="$1"
@@ -32,7 +32,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 set -- "${EXTRA[@]}"
-case "$STEP" in transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|status) ;; *) echo "Unknown step: $STEP" >&2; exit 2 ;; esac
+case "$STEP" in transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|repack|status) ;; *) echo "Unknown step: $STEP" >&2; exit 2 ;; esac
 if [[ -n "$SHARED_RUNTIME" && "$STEP" != shard-refine ]]; then
   echo 'ERROR: --runtime-work-dir is supported only by shard-refine; keep the CPU coordinator runtime separate.' >&2; exit 2
 fi

@@ -222,6 +222,19 @@ bash recam_refine/run_step.sh cleanup "$RECAM_ROOT" "$RECAM_WORK"
 最终成功标志：`SUCCESS.json`。原文件备份在 `original/`，辅助文件在 `auxiliary/`，
 过时模态在 `unused_modalities/`，移出清单在 `moved_auxiliary.json`。这些备份不会自动删除。
 
+## 6. 可选：重新打包最终 DROID depth
+
+在 CPU 上单独执行：
+
+```bash
+bash recam_refine/run_step.sh repack "$RECAM_ROOT" "$RECAM_WORK" \
+  --episodes-per-shard 250 --workers 4 --prepared-runtime
+```
+
+要求最终校验和整理都已成功。沿用原发布格式，仅打包两个外部相机的 depth PNG，
+逐文件核对 SHA-256，原 PNG 保留。整体成功标志为 `REPACK_SUCCESS.json`。
+完整规则见 [REPACK_DEPTH.md](REPACK_DEPTH.md)。
+
 ## 查看进度、恢复与验证范围
 
 随时查看各步的完成标志：

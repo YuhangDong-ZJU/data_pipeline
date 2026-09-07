@@ -92,7 +92,7 @@ def main():
     p.add_argument('--depth-chunks',default='2-13')
     p.add_argument('--episode-manifest',type=Path)
     p = sub.add_parser('run-step',help='Run exactly one manual stage, then stop')
-    p.add_argument('step',choices=('unpack','align','overlap','refine','apply','check','cleanup','status',
+    p.add_argument('step',choices=('unpack','align','overlap','refine','apply','check','cleanup','repack','status',
                                   'shard-plan','shard-refine','shard-merge','shard-status'))
     p.add_argument('root',type=Path)
     p.add_argument('--work-dir',type=Path,required=True)
@@ -107,6 +107,7 @@ def main():
     p.add_argument('--num-shards',type=int,help='shard-plan: number of fixed episode partitions')
     p.add_argument('--shard-id',type=int,help='shard-refine: zero-based partition to compute')
     p.add_argument('--worker-work-dir',type=Path,help='shard-refine: separate worker logs/checkpoints/cache; Bash --runtime-work-dir selects a shared environment')
+    p.add_argument('--episodes-per-shard',type=int,default=250,help='repack: maximum episodes per external-depth TAR')
     p = sub.add_parser("check", help="Read-only full media decoding and metadata validation")
     p.add_argument("root", type=Path)
     p.add_argument("--report-dir", type=Path, required=True)
@@ -161,8 +162,12 @@ def main():
             from .steps import transfer_only
             transfer_only(args)
         elif args.command == 'run-step':
-            from .steps import run_step
-            run_step(args)
+            if args.step == 'repack':
+                from .repack import run_repack
+                run_repack(args)
+            else:
+                from .steps import run_step
+                run_step(args)
         elif args.command == "check":
             from .pipeline import discover
             from .validate import check_subset

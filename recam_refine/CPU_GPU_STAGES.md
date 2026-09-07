@@ -182,3 +182,15 @@ ls -l "$RECAM_WORK/STEP5_CHECK_SUCCESS.json" "$RECAM_WORK/SUCCESS.json"
 
 阶段、完成标志和恢复规则与 [STEP_BY_STEP.md](STEP_BY_STEP.md) 相同。
 可视化使用现有候选时也可在 CPU 上执行；不要加会重新拟合的 `--fit`。
+
+## 5. CPU：可选，重新打包最终 DROID depth
+
+`cleanup` 成功后，按原发布布局重新生成两个外部相机的 depth TAR：
+
+```bash
+bash recam_refine/run_step.sh repack "$RECAM_ROOT" "$RECAM_WORK" \
+  --episodes-per-shard 250 --workers 4 --prepared-runtime
+```
+
+脚本自动检查前置完成记录及数据状态，逐文件验证 TAR 后才发布，原 PNG 保留用于训练。
+看到 `REPACK COMPLETE` 表示打包和核验成功。空间、恢复和文件位置见 [REPACK_DEPTH.md](REPACK_DEPTH.md)。
