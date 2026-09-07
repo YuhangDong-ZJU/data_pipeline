@@ -4,6 +4,10 @@
 用本文的 `shard-plan → shard-refine → shard-merge` 替代单机 `refine`。
 每条命令完成后停止；最后仍由主机逐步执行 `apply → check → cleanup`。
 
+**GPU 节点有空闲回收策略时，优先使用 [CPU_GPU_STAGES.md](CPU_GPU_STAGES.md)**。
+前处理、分片规划、环境安装和后处理都能在 CPU 协调机执行；两台 GPU 节点只运行优化。
+该流程把两个独立 worker 环境提前安装到共享路径，并通过 `--prepared-runtime` 禁止 GPU 阶段安装依赖。
+
 ## 目录和版本
 
 两台机器共享 **同一份数据目录和同一个协调工作目录**。无需复制数据、切分 Parquet 或重新编号 episode。

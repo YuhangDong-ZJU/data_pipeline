@@ -7,6 +7,7 @@
 ## 推荐：每次只执行一个功能
 
 已有 clone 的更新命令、每一步的命令和完成标志，见 **[STEP_BY_STEP.md](STEP_BY_STEP.md)**。
+CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行优化，见 **[CPU_GPU_STAGES.md](CPU_GPU_STAGES.md)**。
 
 | 顺序 | `run_step.sh` 的第一个参数 | 本次执行范围 |
 | --- | --- | --- |

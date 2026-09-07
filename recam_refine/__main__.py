@@ -7,7 +7,7 @@ import platform
 import sys
 
 
-def doctor(gpu=False):
+def doctor(gpu=False,torch_cpu=False):
     import av
     import numpy as np
     import pyarrow
@@ -17,6 +17,13 @@ def doctor(gpu=False):
     av.codec.Codec("libx264", "w")
     result = dict(python=platform.python_version(), platform=platform.platform(),
                   av=av.__version__, pyarrow=pyarrow.__version__, numpy=np.__version__, pillow=Image.__version__)
+    if torch_cpu:
+        import torch
+        d = torch.ones((1,1,8,8),device='cpu')
+        g = torch.zeros((1,1,4,2),device='cpu',requires_grad=True)
+        torch.nn.functional.grid_sample(d,g,align_corners=True).sum().backward()
+        require(g.grad is not None and bool(torch.isfinite(g.grad).all()),'CPU grid_sample check failed')
+        result.update(torch=torch.__version__,torch_cpu_check=True)
     if gpu:
         import torch
         from .batched import CameraBatch
@@ -64,6 +71,7 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("doctor", help="Test runtime and codecs without touching datasets")
     p.add_argument("--gpu", action="store_true")
+    p.add_argument("--torch-cpu", action="store_true")
     p = sub.add_parser("run", help="Run/resume the complete offline pipeline")
     p.add_argument("root", type=Path, help="recam_lerobot directory")
     p.add_argument("--work-dir", type=Path, required=True, help="Separate directory for state, backups, logs and reports")
@@ -145,7 +153,7 @@ def main():
         parser.error('gpu-batch-size must be zero (auto) or positive')
     try:
         if args.command == "doctor":
-            doctor(args.gpu)
+            doctor(args.gpu,args.torch_cpu)
         elif args.command == "run":
             from .pipeline import run
             run(args)

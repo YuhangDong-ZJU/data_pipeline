@@ -31,7 +31,7 @@ def main():
             if shard_id==0:
                 shell('shard-refine','--shard-id','0','--worker-work-dir',str(local),'--devices','cpu',
                       '--iterations','2',success=False)
-            shell('shard-refine','--shard-id',str(shard_id),'--worker-work-dir',str(local),'--devices','cpu')
+            shell('shard-refine','--shard-id',str(shard_id),'--worker-work-dir',str(local),'--devices','cpu','--prepared-runtime')
             assert not (case.work_dir/MARKERS['refine']).exists()
             assert (local/'step_shard-refine.log').exists()
             assert not (case.work_dir/'step_shard-refine.log').exists()

@@ -5,13 +5,19 @@ unset PYTHONHOME PYTHONPATH LD_PRELOAD LD_LIBRARY_PATH
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 if [[ $# -lt 3 ]]; then
-  echo 'Usage: bash recam_refine/run_step.sh <transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|status> <recam_lerobot> <work_dir> [options]' >&2
+  echo 'Usage: bash recam_refine/run_step.sh <transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|status> <recam_lerobot> <work_dir> [--prepared-runtime] [options]' >&2
   exit 2
 fi
 STEP="$1"
 DATASET="$2"
 WORK_DIR="$3"
 shift 3
+PREPARED=()
+EXTRA=()
+for arg in "$@"; do
+  if [[ "$arg" == --prepared-runtime ]]; then PREPARED=(--verify-only); else EXTRA+=("$arg"); fi
+done
+set -- "${EXTRA[@]}"
 case "$STEP" in transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|status) ;; *) echo "Unknown step: $STEP" >&2; exit 2 ;; esac
 RUNTIME_WORK="$WORK_DIR"
 DEVICES="0,1,2,3,4,5,6,7"
@@ -35,6 +41,8 @@ if any(a.is_relative_to(b) or b.is_relative_to(a) for a,b in ((root,local),(work
 print(local)
 PY
 )"
+fi
+if [[ "$STEP" == shard-refine || "$STEP" == refine ]]; then
   DEVICES="$(python3 - "$@" <<'PY'
 import argparse
 p=argparse.ArgumentParser()
@@ -62,9 +70,13 @@ PY
 mkdir -p "$WORK_DIR"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
 BOOTSTRAP=()
-if [[ "$STEP" == refine || "$STEP" == check || ( "$STEP" == shard-refine && "$DEVICES" != cpu ) ]]; then BOOTSTRAP+=(--gpu); fi
+if [[ "$STEP" == check ]]; then
+  BOOTSTRAP+=(--cpu-torch)
+elif [[ "$STEP" == refine || "$STEP" == shard-refine ]]; then
+  if [[ "$DEVICES" == cpu ]]; then BOOTSTRAP+=(--cpu-torch); else BOOTSTRAP+=(--gpu); fi
+fi
 mkdir -p "$RUNTIME_WORK"
-python3 recam_refine/bootstrap.py "$RUNTIME_WORK" "${BOOTSTRAP[@]}" 2>&1 | tee -a "$RUNTIME_WORK/install.log"
+python3 recam_refine/bootstrap.py "$RUNTIME_WORK" "${BOOTSTRAP[@]}" "${PREPARED[@]}" 2>&1 | tee -a "$RUNTIME_WORK/install.log"
 if [[ "$STEP" == transfer ]]; then
   "$WORK_DIR/runtime/env/bin/python" -m recam_refine transfer-depth "$DATASET" --work-dir "$WORK_DIR" "$@" \
     2>&1 | tee -a "$WORK_DIR/step_transfer.log"

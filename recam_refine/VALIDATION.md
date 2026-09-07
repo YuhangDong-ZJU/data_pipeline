@@ -1,5 +1,25 @@
 # 验证记录（2026-09-06）
 
+## 2026-09-07：CPU/GPU 阶段分离
+
+- 新建独立环境安装 `torch==2.5.1+cpu` 和带 SHA-256 的完整锁定依赖，屏蔽全部 GPU。
+  37 项测试全部通过，包含批量优化数学对照；未改动优化目标、分片协议或质量门槛。
+- 实际 Bash 分步流程额外执行 `check --prepared-runtime`：完整解码 DROID 2 个、simulation 1 个
+  合成 episode，然后在 CPU 上完成两个 DROID episode 的真实几何指标计算。
+  合成的常量深度与机器人几何不匹配，正确产生 `QUALITY_REVIEW_REQUIRED.json` 并拒绝 cleanup；
+  没有把测试样例伪装成质量合格的数据。检查前后训练文件内容摘要一致。
+- 两分片 Bash 测试通过：CPU reference 测试路径使用预装环境，保持独立 worker 日志、完整覆盖与显式合并/写回。
+- 在无可见 GPU 的主机进程中执行 `--prepare-gpu`；另在没有 NVIDIA 设备挂载的 Debian 12 / glibc 2.36
+  用户空间中验证已准备的 CUDA wheel 环境能执行 CPU 数值检查。CPU-only 环境在该 Debian 12 中运行 37 项测试全部通过。
+- 实际 RTX 4090 使用 `--gpu --verify-only`，将 HTTP/HTTPS 代理设为不可达地址后仍通过锁定版本检查、
+  `grid_sample` 前后向与批量优化 CUDA Graph 检查。没有网络安装阶段。
+- CI 改为安装 CPU-only Torch，并运行上述包含真实几何测量和质量拒绝门槛的 Bash smoke。
+
+上述测试只使用隔离环境、临时数据和测试目录。未改写原始 DROID/simulation 样例。
+这验证了环境和执行路径；没有在对方两台物理 H100 机器或其共享文件系统上实跑，
+也没有证明其平台的 GPU 空闲回收策略一定不会触发。输入读取和断点 I/O 仍可能短暂不使用 GPU。
+执行说明见 [CPU_GPU_STAGES.md](CPU_GPU_STAGES.md)。
+
 ## 更新：按功能独立执行
 
 新增 `run_step.sh`，顺序为 transfer → unpack → align → overlap → refine → apply → check → cleanup。

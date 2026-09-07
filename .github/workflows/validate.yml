@@ -31,11 +31,11 @@ jobs:
         run: apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates git
       - uses: actions/checkout@v4
       - name: Install locked rootless refinement runtime
-        run: python3 recam_refine/bootstrap.py /tmp/recam-refine-ci
+        run: python3 recam_refine/bootstrap.py /tmp/recam-refine-ci --cpu-torch
       - name: Run transactional media and metadata tests
         run: /tmp/recam-refine-ci/runtime/env/bin/python -m unittest discover -s recam_refine/tests -v
       - name: Exercise manual Bash and CLI stages
-        run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_manual_entry --runtime-work-dir /tmp/recam-refine-ci
+        run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_manual_entry --runtime-work-dir /tmp/recam-refine-ci --cpu-check
       - name: Exercise shared-data shard Bash and CLI stages
         run: /tmp/recam-refine-ci/runtime/env/bin/python -m recam_refine.tests.smoke_shard_entry --runtime-work-dir /tmp/recam-refine-ci
       - name: Lint refinement code

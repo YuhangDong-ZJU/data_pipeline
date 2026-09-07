@@ -3,6 +3,9 @@
 以下每个处理命令只执行指定功能，成功或失败后都会停止。各步使用同一个 `RECAM_WORK`。
 不要把本文所有代码块一次性粘贴执行；先执行当前步骤，查看结果，再选择下一步。
 
+若平台会停止长时间不用 GPU 的机器，使用 **[CPU/GPU 分阶段命令](CPU_GPU_STAGES.md)**：
+CPU 提前准备数据和 GPU 环境，GPU 只计算分片，CPU 完成合并、检查与整理。
+
 ## 0. 对方已经 clone 过仓库：先更新代码
 
 在对方机器原有的 `data_pipeline` 仓库目录中执行：
@@ -183,6 +186,8 @@ Wrist 外参、动作及状态仅保留此前对齐的时间前缀，不改其�
 成功标志：`STEP4_APPLY_SUCCESS.json`；日志：`step_apply.log`。
 
 ## 5a. 完整检查，检查完停止
+
+本步骤使用 CPU-only PyTorch，无需 GPU 或 NVIDIA 驱动；入口会安装锁定的 CPU 依赖。
 
 ```bash
 bash recam_refine/run_step.sh check "$RECAM_ROOT" "$RECAM_WORK" --workers 4
