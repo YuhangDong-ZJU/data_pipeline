@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Rootless Linux x86_64 runtime; never touches system Python/CUDA/Conda."""
 import argparse
+from contextlib import contextmanager
 import hashlib
 import os
 from pathlib import Path
@@ -14,6 +15,33 @@ import urllib.request
 
 UV_VERSION = "0.8.22"
 PYTHON_VERSION = "3.11.11"
+
+
+@contextmanager
+def runtime_lock(root,read_only=False):
+    """Workers share a lease; an installer must have exclusive access."""
+    import fcntl
+    root = root.resolve()
+    if read_only:
+        if not (root/'bootstrap.lock').is_file():
+            raise RuntimeError('Runtime not prepared; run bootstrap on the CPU host first')
+    else:
+        root.mkdir(parents=True,exist_ok=True)
+    with (root/'bootstrap.lock').open('r' if read_only else 'a+') as lock:
+        try:
+            fcntl.flock(lock,(fcntl.LOCK_SH if read_only else fcntl.LOCK_EX)|fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError('Runtime is in use or being installed; finish active workers/installers before changing it') from exc
+        yield lock
+
+
+def runtime_env(root):
+    env = os.environ.copy()
+    for name in ("PYTHONHOME", "PYTHONPATH", "LD_PRELOAD", "LD_LIBRARY_PATH"):
+        env.pop(name, None)
+    env.update(PYTHONNOUSERSITE="1", UV_PYTHON_INSTALL_DIR=str(root / "python"),
+               UV_CACHE_DIR=str(root / "cache"), UV_PYTHON_PREFERENCE="only-managed")
+    return env
 
 
 def download(url, dest):
@@ -40,25 +68,26 @@ def main():
     profile.add_argument("--prepare-gpu", action="store_true", help="Install CUDA wheels on a CPU host; test CPU operations only")
     profile.add_argument("--cpu-torch", action="store_true", help="Install CPU-only PyTorch for geometric checks")
     parser.add_argument("--verify-only", action="store_true", help="Verify the prepared runtime without installing or downloading")
+    parser.add_argument("--exec",dest='command',nargs=argparse.REMAINDER,
+                        help='Run Python arguments with a shared runtime lease; requires --verify-only')
     args = parser.parse_args()
+    if args.command is not None and (not args.verify_only or not args.command):
+        parser.error('--exec requires --verify-only and Python arguments')
     if platform.system() != "Linux" or platform.machine() != "x86_64":
         parser.error("Runtime installer supports Linux x86_64 (including Debian 12).")
-    root = args.work_dir.expanduser().resolve() / "runtime"
-    root.mkdir(parents=True, exist_ok=True)
-    # Serialize installation even when two hosts request status or launch the
-    # same worker directory before the workflow-level lock has been acquired.
-    import fcntl
-    with (root / 'bootstrap.lock').open('a+') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX)
+    root = (args.work_dir.expanduser().resolve() / "runtime").resolve()
+    with runtime_lock(root,args.verify_only) as lock:
         install(root,args.gpu,args.prepare_gpu,args.cpu_torch,args.verify_only)
+        if args.command:
+            # Keep the lease throughout the worker, including if its launcher
+            # exits first. Another worker may read, but no installer may write.
+            result = subprocess.run([str(root/'env/bin/python'),*args.command],env=runtime_env(root),
+                                    pass_fds=(lock.fileno(),))
+            raise SystemExit(result.returncode)
 
 
 def install(root,gpu=False,prepare_gpu=False,cpu_torch=False,verify_only=False):
-    env = os.environ.copy()
-    for name in ("PYTHONHOME", "PYTHONPATH", "LD_PRELOAD", "LD_LIBRARY_PATH"):
-        env.pop(name, None)
-    env.update(PYTHONNOUSERSITE="1", UV_PYTHON_INSTALL_DIR=str(root / "python"),
-               UV_CACHE_DIR=str(root / "cache"), UV_PYTHON_PREFERENCE="only-managed")
+    env = runtime_env(root)
     uv = root / "uv"
     if not uv.exists():
         if verify_only:

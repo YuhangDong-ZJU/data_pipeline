@@ -8,6 +8,7 @@
 
 已有 clone 的更新命令、每一步的命令和完成标志，见 **[STEP_BY_STEP.md](STEP_BY_STEP.md)**。
 CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行优化，见 **[CPU_GPU_STAGES.md](CPU_GPU_STAGES.md)**。
+两台 GPU 可通过 `--runtime-work-dir` 共用一套预装环境，各自保留独立的 worker 日志、断点和缓存。
 
 | 顺序 | `run_step.sh` 的第一个参数 | 本次执行范围 |
 | --- | --- | --- |

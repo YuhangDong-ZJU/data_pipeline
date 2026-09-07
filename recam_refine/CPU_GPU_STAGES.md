@@ -25,8 +25,8 @@ GPU 机器只运行 `shard-refine`；其余阶段由 CPU 协调机完成。每�
 
 ## 0. 共享路径和代码
 
-CPU 协调机与 GPU A/B 都使用 Linux x86_64（支持 Debian 12），共享数据、协调目录、代码和两个 worker 目录，
-并挂载在相同绝对路径。worker 环境的 Python 路径须在 GPU 节点也能访问；目录需要允许执行文件。
+CPU 协调机与 GPU A/B 都使用 Linux x86_64（支持 Debian 12），共享数据、协调目录、代码和 GPU 环境，
+并挂载在相同绝对路径。共享 Python 环境需要允许执行文件。下面两个独立 worker 目录也放在共享存储，便于恢复。
 所有节点设置下面的变量，替换为实际路径：
 
 ```bash
@@ -34,14 +34,15 @@ export REPO_DIR=/shared/data_pipeline
 export RECAM_ROOT=/shared/recam_lerobot
 export RECAM_WORK=/shared/recam_refine_work
 export DEPTH_OUTPUT=/shared/droid_depth_output
+export GPU_RUNTIME=/shared/recam_gpu_runtime
 export WORKER_A=/shared/recam_workers/shard_0
 export WORKER_B=/shared/recam_workers/shard_1
 cd "$REPO_DIR"
 ```
 
 保留已开始流程的原 `RECAM_WORK` 和 worker 目录；不要重建或清空记录。
-这些工作目录必须在数据集外，互不嵌套。共享存储要求见 [MULTI_MACHINE.md](MULTI_MACHINE.md)。
-若 worker 目录仅在 GPU 本地磁盘，CPU 节点无法提前安装；需要使用共享路径或由平台准备作业环境。
+这些工作目录和 `GPU_RUNTIME` 必须在数据集外，互不嵌套。共享存储要求见 [MULTI_MACHINE.md](MULTI_MACHINE.md)。
+worker 目录也可以使用 GPU 本地磁盘；环境仍从共享 `GPU_RUNTIME` 读取，本地日志/断点需自行保留以供恢复。
 
 仅在 CPU 节点更新共享仓库，不要多个节点同时操作 Git：
 
@@ -91,21 +92,17 @@ bash recam_refine/run_step.sh shard-plan "$RECAM_ROOT" "$RECAM_WORK" \
 python3 recam_refine/bootstrap.py "$RECAM_WORK" --cpu-torch
 ```
 
-分别安装两个 GPU worker 的环境：
+只安装一套供 GPU A/B 共用的环境：
 
 ```bash
-python3 recam_refine/bootstrap.py "$WORKER_A" --prepare-gpu
-```
-
-```bash
-python3 recam_refine/bootstrap.py "$WORKER_B" --prepare-gpu
+python3 recam_refine/bootstrap.py "$GPU_RUNTIME" --prepare-gpu
 ```
 
 `--prepare-gpu` 下载锁定的 PyTorch/CUDA 用户态依赖，在 CPU 上检查导入和数值运算，
 不要求 CPU 机器有 NVIDIA 驱动。无需修改系统 CUDA、Conda 或安装 nvcc。
 它不能预先证明 GPU 节点的驱动可用；下一阶段会用实际 GPU 验证。
-两个 worker 环境相互独立，不与 CPU 环境互相替换 Torch。
-以上三条命令全部成功、`SHARD_PLAN_READY.json` 已生成后，再启动或申请 GPU 节点。
+两台 GPU 共用 `$GPU_RUNTIME/runtime/env/bin/python`，CPU 检查环境继续独立，避免替换 GPU 版 Torch。
+以上两条命令全部成功、`SHARD_PLAN_READY.json` 已生成后，再启动或申请 GPU 节点。
 
 ## 3. GPU：只运行优化
 
@@ -114,6 +111,7 @@ GPU A 重新设置第 0 步路径并进入仓库，然后执行：
 ```bash
 bash recam_refine/run_step.sh shard-refine "$RECAM_ROOT" "$RECAM_WORK" \
   --shard-id 0 --worker-work-dir "$WORKER_A" \
+  --runtime-work-dir "$GPU_RUNTIME" \
   --devices 0,1,2,3,4,5,6,7 --gpu-batch-size 0 --prepared-runtime
 ```
 
@@ -122,12 +120,19 @@ GPU B 同样设置路径，执行：
 ```bash
 bash recam_refine/run_step.sh shard-refine "$RECAM_ROOT" "$RECAM_WORK" \
   --shard-id 1 --worker-work-dir "$WORKER_B" \
+  --runtime-work-dir "$GPU_RUNTIME" \
   --devices 0,1,2,3,4,5,6,7 --gpu-batch-size 0 --prepared-runtime
 ```
 
-`--prepared-runtime` 只核对已安装版本、依赖和实际 GPU 数值运算/CUDA Graph；不会下载或安装包。
+`--runtime-work-dir` 选择共享环境，并强制只验证、不安装；`--prepared-runtime` 可保留以明确此意图。
+入口核对已安装版本、依赖和实际 GPU 数值运算/CUDA Graph；不会下载或安装包。
 环境缺失或版本不符时立即失败，回到 CPU 机器重新执行相应的准备命令。
 GPU A/B 可以同时开始，不需要多机通信或分布式进程组。
+
+共享环境的读锁保持到各 worker 结束，两台机器可以并发读取；安装器需要独占锁，运行期间重装会被拒绝。
+`step_shard-refine.log`、`calibration_state/` 和 `runtime_cache/` 仍分别写入各自的 `WORKER_A/B`。
+已有 worker 内的旧 `runtime/` 不会被覆盖或删除；新命令选择指定的共享环境，原日志、断点及候选仍沿用。
+旧的独立环境入口仍然兼容，省略 `--runtime-work-dir` 即保持原行为。
 
 CPU 协调机查看进度：
 

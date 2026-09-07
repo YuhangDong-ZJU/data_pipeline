@@ -106,7 +106,7 @@ def main():
     p.add_argument('--audit-frames',type=int,default=8)
     p.add_argument('--num-shards',type=int,help='shard-plan: number of fixed episode partitions')
     p.add_argument('--shard-id',type=int,help='shard-refine: zero-based partition to compute')
-    p.add_argument('--worker-work-dir',type=Path,help='shard-refine: separate per-machine runtime/checkpoint directory')
+    p.add_argument('--worker-work-dir',type=Path,help='shard-refine: separate worker logs/checkpoints/cache; Bash --runtime-work-dir selects a shared environment')
     p = sub.add_parser("check", help="Read-only full media decoding and metadata validation")
     p.add_argument("root", type=Path)
     p.add_argument("--report-dir", type=Path, required=True)

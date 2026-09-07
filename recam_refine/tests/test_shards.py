@@ -37,7 +37,7 @@ def fake_calibration(root,info,pending,urdf,work,args,backend):
             metrics=[dict(accepted=False,status='official_initial_retained',reason='synthetic unobservable robot')]*2))
 
 
-def fixture(tmp,pending=(0,1),num_shards=2):
+def fixture(tmp,pending=(0,1),num_shards=2,devices='cpu'):
     args,droid,archives = manual_fixture(tmp)
     for i in pending:
         (args.pointworld_cameras/f'lab+{i}_cameras.json').unlink()
@@ -46,6 +46,7 @@ def fixture(tmp,pending=(0,1),num_shards=2):
         args.step = stage
         run_step(args)
     args.num_shards,args.shard_id = num_shards,0
+    args.devices = devices
     args.worker_work_dir = tmp/'worker0'
     args.refine_backend,args.gpu_batch_size,args.no_cuda_graphs = 'auto',0,False
     with patch('recam_refine.shards.prepare_assets',fake_assets):

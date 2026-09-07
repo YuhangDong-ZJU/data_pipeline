@@ -6,7 +6,7 @@
 
 **GPU 节点有空闲回收策略时，优先使用 [CPU_GPU_STAGES.md](CPU_GPU_STAGES.md)**。
 前处理、分片规划、环境安装和后处理都能在 CPU 协调机执行；两台 GPU 节点只运行优化。
-该流程把两个独立 worker 环境提前安装到共享路径，并通过 `--prepared-runtime` 禁止 GPU 阶段安装依赖。
+该流程提前安装一套共享 GPU 环境，用 `--runtime-work-dir` 让两台机器共用，并禁止 GPU 阶段安装依赖。
 
 ## 目录和版本
 
@@ -41,6 +41,11 @@ export RECAM_WORK=/shared/recam_refine_work
 每个分片再使用独立的 `--worker-work-dir`，例如本机可写的 `/scratch/recam_worker_0`。
 它保存运行环境、日志、Adam 断点和候选缓存；推荐本地 SSD，不能放在数据集或 `RECAM_WORK` 内，三者互不嵌套。
 入口自动安装锁定环境；无需额外安装 CUDA Toolkit、模型权重或多机通信库。
+
+上述默认入口仍支持每个 worker 独立环境。推荐按 [CPU/GPU 分阶段命令](CPU_GPU_STAGES.md) 在 CPU 上
+执行一次 `bootstrap.py "$GPU_RUNTIME" --prepare-gpu`，然后两台 GPU 的 `shard-refine` 都加
+`--runtime-work-dir "$GPU_RUNTIME" --prepared-runtime`。共享环境必须与数据、协调目录及 worker 目录互不嵌套。
+运行期间环境使用共享锁，安装器无法中途修改依赖；日志、优化断点和运行缓存仍各自独立。
 
 ## 1. 主机生成固定分片计划
 
