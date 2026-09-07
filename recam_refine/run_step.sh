@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export PYTHONNOUSERSITE=1
-unset PYTHONHOME PYTHONPATH LD_PRELOAD LD_LIBRARY_PATH
+unset PYTHONHOME PYTHONPATH
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 if [[ $# -lt 3 ]]; then
-  echo 'Usage: bash recam_refine/run_step.sh <transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|repack|status> <recam_lerobot> <work_dir> [--prepared-runtime] [--runtime-work-dir SHARED_ENV (shard-refine only)] [options]' >&2
+  echo 'Usage: bash recam_refine/run_step.sh <transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|repack|status> <recam_lerobot> <work_dir> [--reuse-env | --python PATH | --conda-env NAME] [--prepared-runtime] [--runtime-work-dir SHARED_ENV (shard-refine only)] [options]' >&2
   exit 2
 fi
 STEP="$1"
@@ -14,9 +14,23 @@ WORK_DIR="$3"
 shift 3
 PREPARED=()
 SHARED_RUNTIME=""
+REUSE_ENV="${RECAM_REFINE_REUSE_ENV:-0}"
+REUSE_SELECTOR=()
+if [[ -n "${RECAM_REFINE_PYTHON:-}" || -n "${RECAM_REFINE_ENV_NAME:-}" ]]; then REUSE_ENV=1; fi
 EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --reuse-env) REUSE_ENV=1; shift ;;
+    --python|--conda-env)
+      if [[ $# -lt 2 || -z "$2" || "$2" == --* || ${#REUSE_SELECTOR[@]} -gt 0 ]]; then
+        echo 'ERROR: supply exactly one --python PATH or --conda-env NAME.' >&2; exit 2
+      fi
+      REUSE_ENV=1; REUSE_SELECTOR=("$1" "$2"); shift 2 ;;
+    --python=*|--conda-env=*)
+      if [[ -z "${1#*=}" || ${#REUSE_SELECTOR[@]} -gt 0 ]]; then
+        echo 'ERROR: supply exactly one --python PATH or --conda-env NAME.' >&2; exit 2
+      fi
+      REUSE_ENV=1; REUSE_SELECTOR=("$1"); shift ;;
     --prepared-runtime) PREPARED=(--verify-only); shift ;;
     --runtime-work-dir)
       if [[ $# -lt 2 || -z "$2" || "$2" == --* || -n "$SHARED_RUNTIME" ]]; then
@@ -32,6 +46,13 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 set -- "${EXTRA[@]}"
+if [[ "$REUSE_ENV" != 0 && "$REUSE_ENV" != 1 ]]; then
+  echo 'ERROR: RECAM_REFINE_REUSE_ENV must be 0 or 1.' >&2; exit 2
+fi
+if [[ "$REUSE_ENV" == 1 && -n "$SHARED_RUNTIME" ]]; then
+  echo 'ERROR: --reuse-env selects an existing environment; omit --runtime-work-dir, or use --python with its env/bin/python.' >&2; exit 2
+fi
+if [[ "$REUSE_ENV" == 0 ]]; then unset LD_PRELOAD LD_LIBRARY_PATH; fi
 case "$STEP" in transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|repack|status) ;; *) echo "Unknown step: $STEP" >&2; exit 2 ;; esac
 if [[ -n "$SHARED_RUNTIME" && "$STEP" != shard-refine ]]; then
   echo 'ERROR: --runtime-work-dir is supported only by shard-refine; keep the CPU coordinator runtime separate.' >&2; exit 2
@@ -103,6 +124,24 @@ PY
 fi
 mkdir -p "$WORK_DIR"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
+if [[ "$REUSE_ENV" == 1 ]]; then
+  PROFILE=base
+  case "$STEP" in
+    overlap) PROFILE=overlap ;;
+    shard-plan|shard-merge) PROFILE=geometry ;;
+    check) PROFILE=cpu ;;
+    refine|shard-refine)
+      if [[ "$DEVICES" == cpu ]]; then PROFILE=cpu; else PROFILE=gpu; fi ;;
+  esac
+  mkdir -p "$LOG_WORK"
+  COMMAND=(run-step "$STEP")
+  if [[ "$STEP" == transfer ]]; then COMMAND=(transfer-depth); fi
+  python3 -m recam_refine.environment "$WORK_DIR" --profile "$PROFILE" \
+    --cache-work-dir "$LOG_WORK" "${REUSE_SELECTOR[@]}" --exec \
+    -m recam_refine "${COMMAND[@]}" "$DATASET" --work-dir "$WORK_DIR" "$@" \
+    2>&1 | tee -a "$LOG_WORK/step_${STEP}.log"
+  exit 0
+fi
 BOOTSTRAP=()
 if [[ "$STEP" == check ]]; then
   BOOTSTRAP+=(--cpu-torch)

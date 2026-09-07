@@ -9,6 +9,8 @@
 已有 clone 的更新命令、每一步的命令和完成标志，见 **[STEP_BY_STEP.md](STEP_BY_STEP.md)**。
 CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行优化，见 **[CPU_GPU_STAGES.md](CPU_GPU_STAGES.md)**。
 两台 GPU 可通过 `--runtime-work-dir` 共用一套预装环境，各自保留独立的 worker 日志、断点和缓存。
+机器已有环境时，优先使用 [复用已有环境](REUSE_ENVIRONMENTS.md)：`run_step.sh --reuse-env` 自动查找并验证
+现有 Conda/Python，支持 Python 3.10/3.11，不安装或升级任何包；也可显式指定 `--python` / `--conda-env`。
 
 | 顺序 | `run_step.sh` 的第一个参数 | 本次执行范围 |
 | --- | --- | --- |

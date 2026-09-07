@@ -13,7 +13,7 @@ def doctor(gpu=False,torch_cpu=False):
     import pyarrow
     from PIL import Image
     from .common import require
-    require(sys.version_info[:2] == (3, 11), "Use the provided Python 3.11 runtime")
+    require(sys.version_info[:2] in ((3, 10), (3, 11)), "Use Python 3.10 or 3.11")
     av.codec.Codec("libx264", "w")
     result = dict(python=platform.python_version(), platform=platform.platform(),
                   av=av.__version__, pyarrow=pyarrow.__version__, numpy=np.__version__, pillow=Image.__version__)

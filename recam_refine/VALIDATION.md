@@ -1,5 +1,23 @@
 # 验证记录（2026-09-06）
 
+## 2026-09-07：直接复用已有环境，不安装依赖
+
+- `run_step.sh --reuse-env` / `RECAM_REFINE_REUSE_ENV=1` 支持自动发现既有 Conda 环境，
+  或以 `--python` / `--conda-env` 指定。缺依赖时停止，不创建环境，不调用 pip/conda 安装。
+- 50 项单元测试通过。新增真实 Bash/CLI 测试覆盖显式解释器不可用时保持数据不变、
+  禁用网络下的 transfer/unpack/align、双 worker 独立缓存，以及跨机器 GPU 版本一致性。
+- 在验证服务器已有的 `droid_normals` Conda 环境上运行临时媒体样例：Python 3.10.20、
+  NumPy 1.26.4、PyArrow 25.0.0、Pillow 11.1.0、PyAV 16.0.1、SciPy 1.15.3、
+  huggingface-hub 0.30.1。真实迁移、解包、视频/Parquet 裁尾对齐通过；没有修改原始样例数据。
+  自动 Conda 发现也选中了同一可用环境，未要求手工提供 Python 路径。
+- 已有 `2.8.0+cu129` 环境在屏蔽 GPU、禁用网络时通过 prepare-gpu 和 CPU 运算检查；
+  两个 CUDA worker 复用同一已有环境的启动、合并、写回测试通过，CUDA 检查使用两张 RTX 4090。
+  分片样例使用已有发布外参；真实批量 CUDA 优化器通过启动时的合成几何检查。
+- 复用 managed runtime 时，从能力检查到子进程退出保持读锁；两个读者可并发，安装器被排除。
+  Bash 语法和 Ruff 检查通过。Debian 12 CI 增加了已有解释器、双 worker 和读锁回归测试。
+- 这些结果不等于已验证对方服务器的实际 Conda 内容或 Hugging Face 网络。目标机器会自行执行
+  同样的能力检查；环境复用不取消数据/几何质量验收，也不绕过 TLS。
+
 ## 2026-09-07：匹配 PyTorch 2.8.0+cu129
 
 - 按对方环境锁定 GPU `torch==2.8.0+cu129`，CPU 检查环境同步为 `torch==2.8.0+cpu`。

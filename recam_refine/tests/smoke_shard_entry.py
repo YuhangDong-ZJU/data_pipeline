@@ -14,22 +14,24 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--runtime-work-dir',type=Path,required=True)
     parser.add_argument('--shared-runtime',action='store_true')
+    parser.add_argument('--reuse-env',action='store_true')
     parser.add_argument('--test-devices',default='cpu',help='Optional CUDA IDs for shared-runtime smoke, e.g. 0,1')
     args = parser.parse_args()
     runtime = (args.runtime_work_dir/'runtime').resolve()
-    if args.test_devices!='cpu' and not args.shared_runtime:
-        parser.error('--test-devices requires --shared-runtime')
+    if args.test_devices!='cpu' and not (args.shared_runtime or args.reuse_env):
+        parser.error('--test-devices requires --shared-runtime or --reuse-env')
     repo = Path(__file__).resolve().parents[2]
     with tempfile.TemporaryDirectory(prefix='recam_shard_cli_') as td:
         case,droid,_ = fixture(Path(td),pending=(),devices=args.test_devices)
         (case.work_dir/'runtime').symlink_to(runtime,target_is_directory=True)
         before = all_files(droid)
+        selection = ['--python',str(runtime/'env/bin/python')] if args.reuse_env else []
         def shell(stage,*extra,success=True):
-            code = subprocess.run(['bash','recam_refine/run_step.sh',stage,str(case.root),str(case.work_dir),*extra],cwd=repo).returncode
+            code = subprocess.run(['bash','recam_refine/run_step.sh',stage,str(case.root),str(case.work_dir),*selection,*extra],cwd=repo).returncode
             assert (code==0)==success,(stage,code)
         shell('shard-plan','--num-shards','2','--devices',args.test_devices,'--iterations','1')
         shell('shard-merge',success=False)
-        if args.shared_runtime:
+        if args.shared_runtime or args.reuse_env:
             shared = Path(td)/'shared_env'
             shared.mkdir()
             (shared/'runtime').symlink_to(runtime,target_is_directory=True)
@@ -45,7 +47,7 @@ def main():
                     device = 'cpu' if args.test_devices=='cpu' else args.test_devices.split(',')[shard_id%len(args.test_devices.split(','))]
                     cmd = ['bash','recam_refine/run_step.sh','shard-refine',str(case.root),str(case.work_dir),
                            '--shard-id',str(shard_id),'--worker-work-dir',str(local),'--devices',device,
-                           '--runtime-work-dir',str(shared)]
+                           *(selection or ['--runtime-work-dir',str(shared)])]
                     # Shared selection itself enforces verify-only, even when
                     # the user omits the redundant --prepared-runtime flag.
                     processes.append((subprocess.Popen(cmd,cwd=repo,stdout=log,stderr=subprocess.STDOUT),log,local))
@@ -68,7 +70,7 @@ def main():
             for invalid in (case.work_dir,local,Path(td)/'not_prepared'):
                 shell('shard-refine','--shard-id','0','--worker-work-dir',str(local),'--devices',args.test_devices,
                       '--runtime-work-dir',str(invalid),success=False)
-        for shard_id in (() if args.shared_runtime else (0,1)):
+        for shard_id in (() if args.shared_runtime or args.reuse_env else (0,1)):
             local = Path(td)/f'worker{shard_id}'
             local.mkdir(exist_ok=True)
             (local/'runtime').symlink_to(runtime,target_is_directory=True)
