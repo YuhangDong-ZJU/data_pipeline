@@ -74,6 +74,7 @@ def main():
                         help="Conversion output root, or foundation_stereo_depth directory")
     parser.add_argument("--report", required=True, type=Path,
                         help="New JSON report outside the conversion output directory")
+    parser.add_argument("--chunks", help="Optional chunk selection, e.g. 0-1 or 0,1,14-18")
     args = parser.parse_args()
     source = args.depth_output.resolve()
     root = source if source.name == "foundation_stereo_depth" else source / "annotations/foundation_stereo_depth"
@@ -83,6 +84,22 @@ def main():
     if report.exists():
         parser.error("Report exists; choose a new report name")
     files = sorted(root.glob("chunk-*/observation.images.depth_*/episode_*.json"))
+    if args.chunks:
+        try:
+            selected = set()
+            for part in args.chunks.split(","):
+                bounds = [int(v) for v in part.split("-")]
+                if len(bounds) == 1:
+                    bounds *= 2
+                if len(bounds) != 2 or not 0 <= bounds[0] <= bounds[1]:
+                    raise ValueError()
+                selected.update(f"chunk-{v:03d}" for v in range(bounds[0], bounds[1]+1))
+        except ValueError:
+            parser.error("Invalid --chunks; use 0-1 or 0,1,14-18")
+        files = [p for p in files if p.relative_to(root).parts[0] in selected]
+        absent = selected - {p.relative_to(root).parts[0] for p in files}
+        if absent:
+            parser.error(f"No JSON records for requested chunks: {sorted(absent)}")
     if not files:
         parser.error(f"No sidecars found under {root}")
     counts = collections.Counter({key: 0 for key in (
@@ -91,20 +108,28 @@ def main():
         "read_or_schema_error", "records_without_detected_anomalies")})
     episodes, affected, signature_episodes = set(), set(), set()
     anomalies = []
+    by_chunk = {}
     for path in files:
         r = inspect(path)
+        chunk = path.relative_to(root).parts[0]
+        bucket = by_chunk.setdefault(chunk, {"camera_records": 0, "episodes": set(),
+            "affected_episodes": set(), "duplicate_final_retry_episodes": set()})
+        bucket["camera_records"] += 1
         counts["scanned_camera_records"] += 1
         # Filename fallback keeps unreadable JSON visible in the episode list.
         episode = path.stem.removeprefix("episode_")
         episodes.add(episode)
+        bucket["episodes"].add(episode)
         counts["records_with_retry"] += bool(r.get("tail_retry_attempted"))
         counts["records_with_padding"] += bool(r.get("tail_missing_count"))
         if r.get("duplicate_final_retry_signature"):
             counts["duplicate_final_retry_records"] += 1
             signature_episodes.add(episode)
+            bucket["duplicate_final_retry_episodes"].add(episode)
         if r["issues"]:
             counts["anomalous_camera_records"] += 1
             affected.add(episode)
+            bucket["affected_episodes"].add(episode)
             anomalies.append(r)
             for issue in r["issues"]:
                 counts[issue] += 1
@@ -113,7 +138,9 @@ def main():
     summary = dict(counts)
     summary.update(scanned_episodes=len(episodes), affected_episodes=len(affected),
                    duplicate_final_retry_episodes=len(signature_episodes))
-    payload = {"root": str(root), "summary": summary,
+    chunk_summary = {c: {k: len(v) if isinstance(v, set) else v for k, v in b.items()}
+                     for c, b in by_chunk.items()}
+    payload = {"root": str(root), "summary": summary, "by_chunk": chunk_summary,
         "affected_episode_ids": sorted(affected),
         "duplicate_final_retry_episode_ids": sorted(signature_episodes),
         "limitations": "Sidecar-only scan. Cannot prove PNG alignment or detect every monotonic frame shift. Retry alone is not an error. No data deleted.",
@@ -122,6 +149,7 @@ def main():
     with report.open("x", encoding="utf-8") as stream:
         json.dump(payload, stream, ensure_ascii=False, indent=2)
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    print(json.dumps(chunk_summary, ensure_ascii=False, indent=2))
     print(f"Report: {report}")
 
 

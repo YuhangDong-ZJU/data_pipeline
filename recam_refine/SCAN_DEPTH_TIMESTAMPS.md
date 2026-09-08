@@ -11,6 +11,8 @@ python3 recam_refine/scan_depth_timestamps.py \
 ```
 
 The input can also be the `annotations/foundation_stereo_depth` directory.
+Use `--chunks 0-1` or `--chunks 14-18` to restrict the scan. A requested chunk
+without JSON files is an error, not a clean scan. Reports include per-chunk counts.
 Reports must be outside the input directory; existing reports are never overwritten.
 Run after conversion writers have stopped. The scan does not modify source files.
 
