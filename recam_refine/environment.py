@@ -301,7 +301,7 @@ def main():
             print(json.dumps(report, indent=2), flush=True)
             if args.command:
                 from .progress import phase
-                phase('processing', detail='environment checks passed; running requested stage')
+                phase('准备输入（任务）',0,1)
                 return subprocess.run([python, *args.command], env=environment(python, cache), pass_fds=fds).returncode
         return 0
     except Exception as exc:

@@ -1,6 +1,7 @@
 """Full streaming integrity checks, including every decoded video/PNG frame."""
 from __future__ import annotations
 
+from .progress import tracked
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 import re
@@ -131,7 +132,7 @@ def check_subset(subset, work, workers=4, droid=False):
     results, failures = [], []
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(validate_episode, task):task[2]["episode_index"] for task in tasks_to_run}
-        for n, future in enumerate(as_completed(futures), 1):
+        for n, future in enumerate(tracked(as_completed(futures),f'完整解码校验：{subset.name} episode',len(futures)), 1):
             try:
                 results.append(future.result())
             except Exception as exc:

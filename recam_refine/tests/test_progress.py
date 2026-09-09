@@ -8,10 +8,30 @@ import tempfile
 import time
 import unittest
 
-from recam_refine.progress import run
+from recam_refine.progress import run, mapped, tracked
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import patch
 
 
 class ProgressTests(unittest.TestCase):
+    def test_completed_futures_preserve_result_order(self):
+        def task(value):
+            time.sleep(.06 if value == 0 else .001)
+            return value*2
+        with patch('recam_refine.progress.phase') as report:
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                self.assertEqual(mapped(pool, task, [0,1,2], 'test'), [0,2,4])
+            self.assertEqual(report.call_args_list[0].args, ('test',0,3))
+            self.assertEqual(report.call_args_list[-1].args, ('test',3,3))
+
+    def test_failed_item_is_not_counted_as_completed(self):
+        with patch('recam_refine.progress.phase') as report:
+            with self.assertRaises(ValueError):
+                for item in tracked([1], 'failure'):
+                    raise ValueError('failed item')
+            self.assertEqual(report.call_count, 1)
+            self.assertEqual(report.call_args.args, ('failure',0,1))
+
     def test_standalone_scanner_logs_and_preserves_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)/'input'
@@ -43,9 +63,11 @@ class ProgressTests(unittest.TestCase):
                        'test', log, interval=.05, capture=True)
             self.assertEqual(code, 7)
             output = log.read_text(encoding='utf-8')
-            self.assertIn('verification 2/5', output)
-            self.assertIn('completed=2/5', output)
-            self.assertIn('RUNNING pid=', output)
+            self.assertIn('phase=verification progress=2/5', output)
+            self.assertIn('progress=2/5', output)
+            self.assertIn('RUNNING elapsed=', output)
+            self.assertNotIn('pid=', output)
+            self.assertNotIn('process alive', output)
             self.assertIn('FAILED exit_code=7', output)
             self.assertFalse(list(Path(tmp).glob('.progress-*')))
 

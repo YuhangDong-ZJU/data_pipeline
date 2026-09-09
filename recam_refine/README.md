@@ -29,9 +29,9 @@ CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行
 
 每步都有独立日志和完成标志；中断后使用相同命令和 work_dir 恢复。
 
-`run_step.sh` 每 30 秒向终端和步骤日志追加一次 `RUNNING` 状态，包含时间、PID、耗时，以及已上报的阶段/完成数量；结束时打印 `SUCCESS` 或 `FAILED` 和退出码。存活提示不代表 I/O 或计算必然在推进，完成数量不变时应结合机器负载判断。Python 输出关闭缓冲，排除步骤会额外报告预检、备份、TAR 重写和索引统计的进度。
+`run_step.sh` 输出状态（`RUNNING` / `SUCCESS` / `FAILED`）、本次步骤耗时，以及当前子阶段的真实完成数/总数。子阶段注明单位（episode、文件、TAR 等），不会混合成虚假的总体百分比。准备输入等单项任务使用 0/1；该数字表示任务数而非数据处理量。批量处理完成后更新计数，最长每 30 秒刷新当前计数和耗时；不再输出 PID 或“进程存活”。Python 输出关闭缓冲。中断重跑时耗时从本次启动计起，已缓存条目通过检查后也计入完成数。
 
-CPU 步骤日志为 `$RECAM_WORK/step_<step>.log`（排除步骤为 `step_exclude_6795.log`）；GPU 分片日志位于各自 worker 目录的 `step_shard-refine.log`。独立时间戳扫描在 JSON 报告旁生成同名 `.log`，每 1000 条记录报告进度，也有 30 秒存活提示。可另开终端执行 `tail -f "$RECAM_WORK/step_exclude_6795.log"` 查看。
+CPU 步骤日志为 `$RECAM_WORK/step_<step>.log`（排除步骤为 `step_exclude_6795.log`）；GPU 分片日志位于各自 worker 目录的 `step_shard-refine.log`。独立时间戳扫描在 JSON 报告旁生成同名 `.log`，每 1000 条记录报告进度，也会定时刷新耗时和进度。可另开终端执行 `tail -f "$RECAM_WORK/step_exclude_6795.log"` 查看。
 `status` 查看完成状态。没有前一步完成记录时拒绝跳步；不会自动运行下一步。
 发布用 depth TAR 的独立命令和校验规则见 [重新打包说明](REPACK_DEPTH.md)。
 第一步只安装 CPU 环境，不依赖 normal 或 PointWorld。

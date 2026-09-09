@@ -1,6 +1,7 @@
 """Read-only camera comparison on ReCam RGB/FS depth, outside fitting frames."""
 from __future__ import annotations
 
+from .progress import phase
 import html
 import hashlib
 import json
@@ -431,6 +432,7 @@ def _run_audit_locked(args):
         grouped.setdefault(key[0], {})[key] = record_value
     tasks = [(root, info, rows[i], plan.get(i), grouped.get(i, {}),
               camera_dir, candidate_dir, args, out / f"episode_{i:06d}") for i in ids]
+    phase('几何校验：episode',0,len(tasks))
     def record(i, report=None, error=None):
         if error is not None:
             errors.append(dict(episode_index=i, error=str(error)))
@@ -438,6 +440,7 @@ def _run_audit_locked(args):
         else:
             reports.append({key:report[key] for key in ("episode_index", "source_episode_id", "summary", "assessment",
                                                        "evaluation_frames", "images")})
+        phase('几何校验：episode',len(reports)+len(errors),len(tasks),f'errors={len(errors)}')
         if (len(reports) + len(errors)) % 100 == 0:
             write_html(out, sorted(reports, key=lambda r:r["episode_index"]), errors)
     workers = getattr(args, "workers", 1)

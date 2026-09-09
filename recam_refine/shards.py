@@ -6,6 +6,7 @@ Only merge publishes the normal refinement completion marker.
 """
 from __future__ import annotations
 
+from .progress import tracked
 from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 import hashlib
@@ -102,7 +103,7 @@ def plan_shards(root,work,args):
         parts = []
         for shard_id in range(args.num_shards):
             part_jobs = pending[shard_id::args.num_shards]
-            for n,job in enumerate(part_jobs,1):
+            for n,job in enumerate(tracked(part_jobs,f'分片 {shard_id} 摘要：episode'),1):
                 job['calibration_inputs'] = input_hashes(root/'real_world/droid',info,job)
                 if n%100==0 or n==len(part_jobs):
                     print(f'Plan shard {shard_id}: hash inputs {n}/{len(part_jobs)}',flush=True)
@@ -215,7 +216,7 @@ def validate_candidate(value,job,plan,part,require_provenance=True):
 
 
 def verify_inputs(root,info,jobs):
-    for n,job in enumerate(jobs,1):
+    for n,job in enumerate(tracked(jobs,'校验分片输入：episode'),1):
         require(input_hashes(root/'real_world/droid',info,job)==job['calibration_inputs'],
                 f'Calibration input bytes changed: episode {job["episode_index"]}')
         if n%100==0 or n==len(jobs):
@@ -347,10 +348,10 @@ def merge_shards(root,work,args):
         # Validate every conflict before publishing anything. Atomic writes allow
         # recovery from interruption halfway through this final publication.
         encoded = {name:(json.dumps(v,ensure_ascii=False,indent=2,allow_nan=False)+'\n').encode() for name,v in expected.items()}
-        for name,data in encoded.items():
+        for name,data in tracked(encoded.items(),'合并预检：相机记录'):
             path = work/'cameras'/name
             require(not path.exists() or sha256(path)==hashlib.sha256(data).hexdigest(),f'Merge candidate conflict: {path}')
-        for name,data in encoded.items():
+        for name,data in tracked(encoded.items(),'合并写入：相机记录'):
             if not (work/'cameras'/name).exists():
                 atomic_bytes(work/'cameras'/name,data)
         result = refinement_result(work,read_json(work/'plan.json'))

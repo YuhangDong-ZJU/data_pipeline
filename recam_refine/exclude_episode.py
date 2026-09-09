@@ -206,7 +206,7 @@ def execute(root, work, report):
         with tarfile.open(backup,'r:*') as inp, tarfile.open(staged,'w') as out:
             for number,member in enumerate(inp,1):
                 if number % 100 == 0:
-                    phase('排除：重写 TAR',detail=f'{archive}; processed members={number}; {member.name}')
+                    phase('排除：重写当前 TAR（个）',0,1,detail=f'{archive}; 已读取成员={number}')
                 if member.isdir():
                     continue
                 rel=Path(member_path(member.name,entry['path']))

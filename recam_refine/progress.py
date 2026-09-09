@@ -1,4 +1,4 @@
-"""Standard-library progress reporting and a signal-aware stage heartbeat."""
+"""Counted stage progress, elapsed time and signal-aware execution."""
 import argparse
 import json
 import os
@@ -10,8 +10,10 @@ import tempfile
 import threading
 import time
 
+_STARTED = time.time()
 
-def phase(name, completed=None, total=None, detail=None):
+
+def phase(name, completed=0, total=1, detail=None):
     """Called by the coordinator only, not by parallel workers."""
     state = dict(phase=name, completed=completed, total=total, detail=detail,
                  updated_at=time.time())
@@ -21,9 +23,33 @@ def phase(name, completed=None, total=None, detail=None):
         temporary = target.with_suffix('.part')
         temporary.write_text(json.dumps(state), encoding='utf-8')
         os.replace(temporary, target)
-    count = f' {completed}/{total}' if completed is not None and total is not None else ''
-    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] {name}{count}' +
+    elapsed = max(0, time.time()-float(os.environ.get('RECAM_PROGRESS_STARTED', _STARTED)))
+    count = f' {completed}/{total}'
+    print(f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] RUNNING elapsed={elapsed:.0f}s phase={name} progress={count.strip()}' +
           (f' | {detail}' if detail else ''), flush=True)
+
+
+def tracked(items, name, total=None):
+    """Count processed items, including checked resume entries; publish at most once/s."""
+    total = len(items) if total is None else total
+    phase(name, 0, total)
+    updated = time.monotonic()
+    for count, item in enumerate(items, 1):
+        yield item
+        now = time.monotonic()
+        if now-updated >= 1 or count == total:
+            phase(name, count, total)
+            updated = now
+
+
+def mapped(pool, function, items, name):
+    """Report completed futures while preserving input order in the returned list."""
+    from concurrent.futures import as_completed
+    futures = {pool.submit(function, item): i for i, item in enumerate(items)}
+    results = [None]*len(items)
+    for future in tracked(as_completed(futures), name, len(futures)):
+        results[futures[future]] = future.result()
+    return results
 
 
 def run(command, label, log, interval=30, capture=False):
@@ -34,11 +60,11 @@ def run(command, label, log, interval=30, capture=False):
     fd, filename = tempfile.mkstemp(prefix='.progress-', suffix='.json', dir=log.parent)
     os.close(fd)
     state = Path(filename)
-    state.write_text(json.dumps({'phase':'stage execution (see detailed output)'}), encoding='utf-8')
+    state.write_text(json.dumps({'phase':'准备（准备任务）','completed':0,'total':1}), encoding='utf-8')
     started = time.monotonic()
     stop = threading.Event()
     env = dict(os.environ, RECAM_PROGRESS_CHILD='1', RECAM_PROGRESS_STATE=filename,
-               PYTHONUNBUFFERED='1')
+               PYTHONUNBUFFERED='1', RECAM_PROGRESS_STARTED=str(time.time()))
     def emit(message):
         line = f'[{time.strftime("%Y-%m-%d %H:%M:%S")}] [{label}] {message}'
         print(line, flush=True)
@@ -63,16 +89,11 @@ def run(command, label, log, interval=30, capture=False):
                 current = json.loads(state.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 current = {'phase':'waiting for stage status'}
-            count = ''
-            if current.get('total') is not None:
-                count = f' completed={current.get("completed")}/{current["total"]}'
-            emit(f'RUNNING pid={process.pid} elapsed={time.monotonic()-started:.0f}s '
-                 f'phase={current["phase"]}{count} '
-                 f'detail={current.get("detail") or "-"} '
-                 '(process alive; does not prove work is advancing)')
+            emit(f'RUNNING elapsed={time.monotonic()-started:.0f}s '
+                 f'phase={current["phase"]} progress={current.get("completed",0)}/{current.get("total",1)}')
     thread = None
     try:
-        emit(f'START; heartbeat every {interval:g}s; detailed progress follows')
+        emit('RUNNING elapsed=0s phase=准备（准备任务） progress=0/1')
         process = subprocess.Popen(command, env=env, start_new_session=os.name=='posix',
                                    stdout=subprocess.PIPE if capture else None,
                                    stderr=subprocess.STDOUT if capture else None,

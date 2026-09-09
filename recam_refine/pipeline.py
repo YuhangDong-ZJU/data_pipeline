@@ -1,6 +1,7 @@
 """Resumable ReCam refinement orchestration."""
 from __future__ import annotations
 
+from .progress import phase, tracked
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
@@ -139,7 +140,8 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
     receipts = []
     # Check all streams before moving any dataset file. Receipts also support
     # recovery when an earlier invocation moved only part of a directory.
-    for i in sorted(manifest):
+    selected = [i for i in sorted(manifest) if int(manifest[i].get('source_episode_index',i))//1000 in chunks]
+    for i in tracked(selected,'迁移预检：episode'):
         original = int(manifest[i].get('source_episode_index', i))
         if original // 1000 not in chunks:
             continue
@@ -173,7 +175,8 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
                         (p.is_file() and sha256(p)==entry['sha256']),
                         f'Neither source nor target matches transfer receipt: {p}')
     log('Depth transfer preflight passed; all selected streams verified')
-    for i, row in sorted(manifest.items()):
+    for i in tracked(selected,'迁移深度：episode'):
+        row = manifest[i]
         original = int(row.get('source_episode_index', i))
         if original // 1000 not in chunks:
             continue
@@ -343,6 +346,7 @@ def apply_episode(args):
 
 
 def update_metadata(root, droid, info, jobs, stats, work, camera_directory=None, calibration_pending=False):
+    phase('更新 metadata（任务）',0,1)
     journal = Journal(root, work)
     episodes = read_json(work / "original_droid_episodes.json")
     by_id = {j["episode_index"]:j for j in jobs}
@@ -401,6 +405,8 @@ def update_metadata(root, droid, info, jobs, stats, work, camera_directory=None,
     # aligned manifest rather than rewriting historical source lengths in place.
     write_jsonl(work / "refined_episode_manifest.jsonl", [dict(j["source"], length=j["length"],
                 before_refine_length=j["original_length"]) for j in jobs])
+    phase('更新 metadata（任务）',1,1)
+
 
 
 def finalize(root, droid, subsets, work):
@@ -408,7 +414,7 @@ def finalize(root, droid, subsets, work):
     journal = Journal(root, work)
     moved = []
     # Verify even same-filesystem renames against their immutable input hashes.
-    for p in sorted((work / "transfer_receipts").glob("*.json")):
+    for p in tracked(sorted((work / 'transfer_receipts').glob('*.json')),'清理前核对：相机序列'):
         receipt = read_json(p)
         for entry in receipt["files"]:
             target = Path(receipt["target"]) / entry["name"]
@@ -417,7 +423,7 @@ def finalize(root, droid, subsets, work):
             require(target.is_file() and sha256(target) == entry["sha256"], f"Transferred depth changed unexpectedly: {target}")
     # Keep simulation and other real-world TARs. DROID TARs are obsolete after
     # trimming; remove only archives whose extraction receipt was verified.
-    for receipt in read_json(work / "unpacked.json"):
+    for receipt in tracked(read_json(work / 'unpacked.json'),'清理：TAR 记录'):
         p = Path(receipt["archive"])
         if p.is_relative_to(droid) and p.exists():
             require(sha256(p) == receipt["sha256"], f"Archive changed during processing: {p}")
@@ -425,7 +431,7 @@ def finalize(root, droid, subsets, work):
     # Discard redundant source copies only after verifying the retained prefix
     # against the final dataset and saving trimmed source frames for recovery.
     if (work / "depth_transfer.json").exists():
-        for rec in read_json(work / "depth_transfer.json"):
+        for rec in tracked(read_json(work / 'depth_transfer.json'),'清理：深度源序列'):
             src, dst = Path(rec["source"]), Path(rec["target"])
             if not src.exists():
                 continue
@@ -447,7 +453,7 @@ def finalize(root, droid, subsets, work):
             for camera in chunk.iterdir():
                 if camera.name in ("observation.images.depth_00", "observation.images.normal_00") or camera.name.startswith("observation.images.normals_"):
                     if camera.is_dir():
-                        for p in sorted(camera.rglob("*")):
+                        for p in tracked(sorted(camera.rglob('*')),'移出旧模态：目录项'):
                             if p.is_file():
                                 journal.retire(p, "unused_modalities")
     # Keep the training tree at subset level to data/images/videos/meta. Save
@@ -466,7 +472,7 @@ def finalize(root, droid, subsets, work):
                 continue
             require(not entry.is_symlink(), f"Symlink in auxiliary files: {entry}")
             files = [entry] if entry.is_file() else sorted(p for p in entry.rglob("*") if p.is_file())
-            for p in files:
+            for p in tracked(files,'移出辅助内容：文件'):
                 journal.retire(p, "auxiliary")
                 moved.append(str(p.relative_to(root)))
     known_dirs = {"logs", "log", "annotations", "__pycache__", ".cache", ".huggingface"}
@@ -478,7 +484,7 @@ def finalize(root, droid, subsets, work):
             path = current / name
             require(not path.is_symlink(), f"Symlink in dataset: {path}")
             if name in known_dirs:
-                for p in sorted(path.rglob("*")):
+                for p in tracked(sorted(path.rglob('*')),'移出辅助目录：目录项'):
                     if p.is_file():
                         journal.retire(p, "auxiliary")
                         moved.append(str(p.relative_to(root)))

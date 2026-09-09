@@ -5,6 +5,7 @@ actual input bytes, poses, point samples and optimization protocol.
 """
 from __future__ import annotations
 
+from .progress import phase
 from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
 import gc
@@ -270,6 +271,7 @@ def process_batch(tasks, next_tasks):
 
 
 def progress(args,completed,total,errors,start):
+    phase('优化外参：episode',completed,total, f'errors={len(errors)}')
     path = getattr(args,'calibration_progress_file',None)
     if path:
         context = getattr(args,'calibration_progress_context',{})
@@ -317,6 +319,7 @@ def run_calibrations(root, info, pending, urdf, work, args, backend):
     require(all(d == 'cpu' or (d.isdigit() and int(d)<torch.cuda.device_count()) for d in devices),
             'Unavailable GPU; check --devices and CUDA_VISIBLE_DEVICES')
     devices = ['cpu' if d == 'cpu' else 'cuda:'+d for d in devices]
+    phase('优化外参：episode',0,len(pending))
     if backend == 'reference':
         errors = _run_reference(root,info,pending,urdf,devices,args.iterations,args)
     else:

@@ -1,6 +1,7 @@
 """Publish verified external-depth TARs after cleanup, retaining training PNGs."""
 from __future__ import annotations
 
+from .progress import tracked
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
@@ -240,7 +241,7 @@ def run_repack(args):
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures = [pool.submit(pack_one, subset, work, job, plan_id) for job in jobs]
             try:
-                for future in as_completed(futures):
+                for future in tracked(as_completed(futures),'打包：TAR',len(futures)):
                     result = future.result()
                     results.append(result)
                     print(f'Repack {len(results)}/{len(jobs)} {result["status"]}: {result["path"]}', flush=True)

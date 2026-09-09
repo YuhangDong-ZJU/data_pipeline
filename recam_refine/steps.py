@@ -1,6 +1,7 @@
 """Independently executable stages sharing the pipeline recovery journal."""
 from __future__ import annotations
 
+from .progress import phase, tracked, mapped
 import os
 from pathlib import Path
 import argparse
@@ -150,7 +151,9 @@ def unpack_only(root,work):
     protected = transferred_streams(droid,work)
     receipts = []
     for subset in discover(root):
-        for archive in sorted((subset/'images').glob('chunk-*/observation.images.depth_*/*.tar')):
+        archives = [p for p in sorted((subset/'images').glob('chunk-*/observation.images.depth_*/*.tar'))
+                    if not (subset==droid and p.parent.name=='observation.images.depth_00')]
+        for archive in tracked(archives,f'解压：{subset.name} TAR'):
             if subset==droid and archive.parent.name=='observation.images.depth_00':
                 continue
             print(f'Unpack {archive}',flush=True)
@@ -187,20 +190,20 @@ def align_only(root,work,args):
             grouped.setdefault(key[0],{})[key] = value
         inputs = [(str(droid),info,e,manifest[e['episode_index']],grouped.get(e['episode_index'],{})) for e in episodes]
         with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            jobs = list(pool.map(plan_episode,inputs,chunksize=1))
+            jobs = mapped(pool,plan_episode,inputs,'对齐：检查 episode')
         write_json(work/'plan.json',jobs)
         write_json(work/'training_info.json',info)
         write_json(work/'03_plan.complete.json',dict(complete=True))
     jobs, info = read_json(work/'plan.json'), read_json(work/'training_info.json')
     camera_dir = work/'alignment_cameras'
     tasks, offset = [], 0
-    for job in jobs:
+    for job in tracked(jobs,'相机参数：episode'):
         camera = dict(source='droid_initial_alignment_only',camera_to_base=np.asarray(job['initial_extrinsics'])[1:].tolist())
         write_json(camera_dir/f'episode_{job["episode_index"]:06d}.json',camera)
         tasks.append((str(root),str(droid),info,job,camera,offset,str(work),'aligned'))
         offset += job['length']
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        stats = list(pool.map(apply_episode,tasks,chunksize=1))
+        stats = mapped(pool,apply_episode,tasks,'写回：episode')
     update_metadata(root,droid,info,jobs,stats,work,camera_dir,calibration_pending=True)
     return dict(episodes=len(jobs),frames=offset,dropped_timesteps=sum(j['previous_length']-j['length'] for j in jobs),
                 calibration='DROID initial extrinsics retained; refinement remains a separate step')
@@ -220,7 +223,7 @@ def camera_inputs(root,work,args):
     require(Path(camera_dir).is_dir(),f'Missing PointWorld camera directory: {camera_dir}')
     write_json(selection,dict(path=str(Path(camera_dir).resolve())))
     entries,counts,details = [],Counter(),[]
-    for job in jobs:
+    for job in tracked(jobs,'相机参数：episode'):
         poses,status = release_pose(camera_dir,job['source'])
         counts[status] += 1
         entries.append((job,poses,status))
@@ -269,7 +272,7 @@ def refine_only(root,work,args):
 
 def refinement_result(work,jobs):
     retained = []
-    for job in jobs:
+    for job in tracked(jobs,'相机参数：episode'):
         camera = read_json(work/'cameras'/f'episode_{job["episode_index"]:06d}.json')
         for cam,metric in enumerate(camera.get('metrics',[]),1):
             if metric.get('accepted') is False:
@@ -288,12 +291,12 @@ def apply_only(root,work,args):
     require({p.name:sha256(p) for p in sorted((work/'cameras').glob('episode_*.json'))}==candidates,
             'Candidates changed after refinement; refusing to apply unverified replacements')
     tasks,offset = [],0
-    for job in jobs:
+    for job in tracked(jobs,'相机参数：episode'):
         camera = read_json(work/'cameras'/f'episode_{job["episode_index"]:06d}.json')
         tasks.append((str(root),str(droid),info,job,camera,offset,str(work)))
         offset += job['length']
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        stats = list(pool.map(apply_episode,tasks,chunksize=1))
+        stats = mapped(pool,apply_episode,tasks,'写回：episode')
     update_metadata(root,droid,info,jobs,stats,work)
     return dict(episodes=len(jobs),frames=offset)
 
@@ -319,7 +322,7 @@ def training_signature(root,subsets):
         for path in sorted((subset/'meta').iterdir()):
             if path.is_file() and path.suffix in ('.json','.jsonl') and not path.name.endswith('failures.jsonl'):
                 add(path,True)
-        for episode in read_jsonl(subset/'meta/episodes.jsonl'):
+        for episode in tracked(read_jsonl(subset/'meta/episodes.jsonl'),f'训练文件摘要：{subset.name} episode'):
             i,n = episode['episode_index'],episode['length']
             add(parquet_path(subset,info,i))
             for key,feature in sorted(info['features'].items()):
