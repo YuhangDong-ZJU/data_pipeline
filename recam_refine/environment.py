@@ -300,6 +300,8 @@ def main():
             print(f'REUSING EXISTING ENVIRONMENT: {python}\n{note}', flush=True)
             print(json.dumps(report, indent=2), flush=True)
             if args.command:
+                from .progress import phase
+                phase('processing', detail='environment checks passed; running requested stage')
                 return subprocess.run([python, *args.command], env=environment(python, cache), pass_fds=fds).returncode
         return 0
     except Exception as exc:

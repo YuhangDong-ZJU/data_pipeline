@@ -21,6 +21,7 @@ from .common import (Journal, require, read_json, read_jsonl, write_json, sha256
                      parquet_path, set_values, values, acquire_directory_lock,
                      validate_lock_mount)
 from .stats import table_stats, aggregate
+from .progress import phase
 
 
 def mapped_path(relative, old, new):
@@ -52,6 +53,7 @@ def episode_files(droid, episode):
 
 
 def execute(root, work, report):
+    phase('排除：读取报告和恢复状态', detail=str(report))
     droid = root/'real_world/droid'
     area = work/'exclude_episode_006795'
     area.mkdir(parents=True, exist_ok=True)
@@ -93,18 +95,22 @@ def execute(root, work, report):
         require({p.name for p in (droid/'meta').iterdir()} <= allowed, 'Unknown metadata; inspect before excluding')
         stats = read_jsonl(droid/'meta/episodes_stats.jsonl')
         require([s['episode_index'] for s in stats] == list(range(last+1)), 'Incomplete episode statistics')
+        phase('排除：定位两个 episode 的媒体文件')
         paths = {str(i): episode_files(droid,i) for i in (6795,last)}
         for i in (6795,last):
             require(parquet_path(droid,info,i) in paths[str(i)], f'Missing Parquet: {i}')
         # Verify all Parquet inputs before changing anything.
         offset = 0
-        for e in episodes:
+        phase('排除：检查原始 Parquet 索引',0,len(episodes))
+        for number,e in enumerate(episodes,1):
             p = parquet_path(droid,info,e['episode_index'])
             t = pq.read_table(p, columns=['episode_index','index','frame_index'])
             require(len(t) == e['length'] and np.all(values(t['episode_index']) == e['episode_index']), f'Bad Parquet: {p}')
             require(np.array_equal(values(t['index']).ravel(),np.arange(offset,offset+len(t))), f'Bad global index: {p}')
             require(np.array_equal(values(t['frame_index']).ravel(),np.arange(len(t))), f'Bad frame index: {p}')
             offset += len(t)
+            if number % 100 == 0 or number == len(episodes):
+                phase('排除：检查原始 Parquet 索引',number,len(episodes),str(p))
         require(offset == info['total_frames'], 'Frame total mismatch')
         archives = []
         from .archives import member_path
@@ -112,6 +118,7 @@ def execute(root, work, report):
             for archive in sorted((droid/f'images/chunk-{chunk:03d}').glob('*/*.tar')):
                 if archive.name.startswith('episode_'):
                     continue
+                phase('排除：检查 TAR 成员',detail=str(archive))
                 affected = False
                 with tarfile.open(archive,'r:*') as tar:
                     for member in tar:
@@ -122,21 +129,32 @@ def execute(root, work, report):
                         affected |= any(f'episode_{i:06d}' in rel.parts for i in (6795,last))
                 if affected:
                     archives.append(dict(path=archive.relative_to(droid).as_posix(),sha256=sha256(archive)))
-        plan = dict(root=str(root), last=last, info=info, episodes=episodes, stats=stats, archives=archives,
-                    files={k:[dict(path=p.relative_to(droid).as_posix(),sha256=sha256(p)) for p in v] for k,v in paths.items()})
+        hashed = {}
+        for k,entries in paths.items():
+            hashed[k] = []
+            phase('排除：计算备份校验值',0,len(entries),f'episode {k}')
+            for number,p in enumerate(entries,1):
+                hashed[k].append(dict(path=p.relative_to(droid).as_posix(),sha256=sha256(p)))
+                if number % 100 == 0 or number == len(entries):
+                    phase('排除：计算备份校验值',number,len(entries),str(p))
+        plan = dict(root=str(root), last=last, info=info, episodes=episodes, stats=stats, archives=archives, files=hashed)
         write_json(plan_path, plan)
     plan = read_json(plan_path)
     require(plan['root'] == str(root), 'Exclusion root changed')
     last, info = plan['last'], copy.deepcopy(plan['info'])
     # All media and sidecars from both touched episodes are backed up before replacement.
     for entries in plan['files'].values():
-        for entry in entries:
+        phase('排除：备份并校验文件',0,len(entries))
+        for number,entry in enumerate(entries,1):
             p = droid/entry['path']
             backup = journal.backup(p)
             require(backup.is_file() and sha256(backup) == entry['sha256'], f'Backup mismatch: {p}')
+            if number % 100 == 0 or number == len(entries):
+                phase('排除：备份并校验文件',number,len(entries),str(p))
     # Remove the bad episode from live paths (backups remain outside the dataset).
     retired = area/'retired.complete.json'
     if not retired.exists():
+        phase('排除：移除已备份的异常 episode 文件')
         for entry in plan['files']['6795']:
             p = droid/entry['path']
             if p.exists():
@@ -145,7 +163,9 @@ def execute(root, work, report):
         write_json(retired, dict(complete=True))
     relocated = area/'relocated.complete.json'
     if not relocated.exists():
-        for entry in plan['files'][str(last)]:
+        entries = plan['files'][str(last)]
+        phase('排除：安装补位 episode',0,len(entries))
+        for number,entry in enumerate(entries,1):
             rel = Path(entry['path'])
             dst = droid/mapped_path(rel,last,6795)
             src = area/'original'/droid.relative_to(root)/rel
@@ -166,12 +186,15 @@ def execute(root, work, report):
                 shutil.copy2(src,staged)
                 require(sha256(staged) == entry['sha256'], f'Copy mismatch: {dst}')
             os.replace(staged,dst)
+            if number % 100 == 0 or number == len(entries):
+                phase('排除：安装补位 episode',number,len(entries),str(dst))
         write_json(relocated,dict(complete=True))
     # Original release TARs span many episodes. Remove bad/moved members so unpack
     # cannot resurrect either original identity; materialize the moved PNGs.
     from .archives import member_path, check_png
     for entry in plan['archives']:
         archive=droid/entry['path']
+        phase('排除：备份或重写相关 TAR',detail=str(archive))
         receipt=area/'archives'/(hashlib.sha256(entry['path'].encode()).hexdigest()+'.json')
         if receipt.exists():
             require(sha256(archive)==read_json(receipt)['sha256'],'Rewritten TAR changed')
@@ -181,7 +204,9 @@ def execute(root, work, report):
         staged=archive.with_name(archive.name+'.exclude-part')
         expected={}
         with tarfile.open(backup,'r:*') as inp, tarfile.open(staged,'w') as out:
-            for member in inp:
+            for number,member in enumerate(inp,1):
+                if number % 100 == 0:
+                    phase('排除：重写 TAR',detail=f'{archive}; processed members={number}; {member.name}')
                 if member.isdir():
                     continue
                 rel=Path(member_path(member.name,entry['path']))
@@ -203,6 +228,7 @@ def execute(root, work, report):
                     expected[member.name]=hashlib.file_digest(stream,'sha256').hexdigest() if hasattr(hashlib,'file_digest') else hashlib.sha256(stream.read()).hexdigest()
                 out.addfile(member,inp.extractfile(member))
         actual={}
+        phase('排除：核对重写后的 TAR 内容',detail=str(archive))
         with tarfile.open(staged) as tar:
             for member in tar:
                 with tar.extractfile(member) as stream:
@@ -215,6 +241,7 @@ def execute(root, work, report):
     stats = copy.deepcopy(plan['stats'][:-1])
     stats[6795] = dict(copy.deepcopy(plan['stats'][last]),episode_index=6795)
     offset = 0
+    phase('排除：更新全局索引与逐 episode 统计',0,len(episodes))
     for e,s in zip(episodes,stats):
         i,n = e['episode_index'],e['length']
         p = parquet_path(droid,info,i)
@@ -230,8 +257,9 @@ def execute(root, work, report):
         require(len(t) == n, f'Length changed: {p}')
         s['stats'].update(table_stats(t.select(['index','episode_index'])))
         offset += n
-        if i % 1000 == 0:
-            print(f'Exclusion index/statistics verification: {i}/{len(episodes)}',flush=True)
+        if (i+1) % 100 == 0 or i+1 == len(episodes):
+            phase('排除：更新全局索引与逐 episode 统计',i+1,len(episodes))
+    phase('排除：清理旧编号并写入全局 metadata')
     for entry in plan['files'][str(last)]:
         p = droid/entry['path']
         if p.exists():

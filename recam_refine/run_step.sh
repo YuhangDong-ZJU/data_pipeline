@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export PYTHONNOUSERSITE=1
+export PYTHONUNBUFFERED=1
+ORIGINAL_ARGS=("$@")
 unset PYTHONHOME PYTHONPATH
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
@@ -106,6 +108,12 @@ if sys.argv[3]=='transfer':
         raise SystemExit('ERROR: depth_output must exist and be separate from dataset and work_dir.')
 PY
 LOG_WORK="$RUNTIME_WORK"
+if [[ "${RECAM_PROGRESS_CHILD:-0}" != 1 ]]; then
+  PROGRESS_LOG="$LOG_WORK/step_${STEP}.log"
+  if [[ "$STEP" == exclude-6795 ]]; then PROGRESS_LOG="$LOG_WORK/step_exclude_6795.log"; fi
+  exec python3 "$SCRIPT_DIR/progress.py" --label "$STEP" --log "$PROGRESS_LOG" \
+    -- bash "$SCRIPT_DIR/run_step.sh" "${ORIGINAL_ARGS[@]}"
+fi
 if [[ -n "$SHARED_RUNTIME" ]]; then
   RUNTIME_WORK="$(python3 - "$SHARED_RUNTIME" "$DATASET" "$WORK_DIR" "$LOG_WORK" <<'PY'
 from pathlib import Path

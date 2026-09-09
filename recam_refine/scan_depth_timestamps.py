@@ -3,7 +3,13 @@ import argparse
 import collections
 import json
 import math
+import os
+import sys
 from pathlib import Path
+try:
+    from .progress import phase, run
+except ImportError:
+    from progress import phase, run
 
 
 def inspect(path):
@@ -83,6 +89,10 @@ def main():
         parser.error("Report must be outside --depth-output")
     if report.exists():
         parser.error("Report exists; choose a new report name")
+    if os.environ.get('RECAM_PROGRESS_CHILD') != '1':
+        return run([sys.executable,str(Path(__file__).resolve()),*sys.argv[1:]],
+                   'timestamp-scan',report.with_suffix('.log'),capture=True)
+    phase('扫描：定位 JSON',detail=str(root))
     files = sorted(root.glob("chunk-*/observation.images.depth_*/episode_*.json"))
     if args.chunks:
         try:
@@ -109,7 +119,8 @@ def main():
     episodes, affected, signature_episodes = set(), set(), set()
     anomalies = []
     by_chunk = {}
-    for path in files:
+    phase('扫描：检查时间戳',0,len(files))
+    for number,path in enumerate(files,1):
         r = inspect(path)
         chunk = path.relative_to(root).parts[0]
         bucket = by_chunk.setdefault(chunk, {"camera_records": 0, "episodes": set(),
@@ -135,6 +146,8 @@ def main():
                 counts[issue] += 1
         else:
             counts["records_without_detected_anomalies"] += 1
+        if number % 1000 == 0 or number == len(files):
+            phase('扫描：检查时间戳',number,len(files),f'affected episodes={len(affected)}')
     summary = dict(counts)
     summary.update(scanned_episodes=len(episodes), affected_episodes=len(affected),
                    duplicate_final_retry_episodes=len(signature_episodes))
@@ -154,4 +167,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
