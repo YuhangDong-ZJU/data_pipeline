@@ -1,0 +1,13 @@
+# Shared paths from the Feishu runbook. Environment variables may override them.
+export RECAM_ROOT="${RECAM_ROOT:-/mnt/bn/pistis/moranli/Data/recam_lerobot/recam_lerobot}"
+export RECAM_WORK="${RECAM_WORK:-/mnt/bn/pistis/moranli/Data/recam_lerobot/recam_refine_work}"
+export DEPTH_OUTPUT="${DEPTH_OUTPUT:-/mnt/bn/pistis/moranli/Data/DROID_Depth/droid_depth_output}"
+export WORKER_A="${WORKER_A:-/mnt/bn/yuyingchen/moranli/Code/Research/ModelArch/ReCam/recam_refine_workers/shard_0}"
+export WORKER_B="${WORKER_B:-/mnt/bn/yuyingchen/moranli/Code/Research/ModelArch/ReCam/recam_refine_workers/shard_1}"
+export ALIGN_WORKERS="${ALIGN_WORKERS:-8}"
+export CHECK_WORKERS="${CHECK_WORKERS:-4}"
+export REPACK_WORKERS="${REPACK_WORKERS:-8}"
+export AUDIT_FRAMES="${AUDIT_FRAMES:-24}"
+export GPU_DEVICES="${GPU_DEVICES:-0,1,2,3,4,5,6,7}"
+export GPU_BATCH_SIZE="${GPU_BATCH_SIZE:-0}"
+export EPISODES_PER_TAR="${EPISODES_PER_TAR:-250}"

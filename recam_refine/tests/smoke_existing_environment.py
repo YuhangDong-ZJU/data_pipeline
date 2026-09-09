@@ -21,7 +21,7 @@ def main():
                    HF_HUB_OFFLINE='1', CUDA_VISIBLE_DEVICES='', PYTHONDONTWRITEBYTECODE='1')
         def shell(stage, *extra, python=args.python, success=True):
             command = ['bash', 'recam_refine/run_step.sh', stage, str(fixture.root), str(fixture.work_dir),
-                       '--python', str(python), *extra]
+                       '--python', str(python), '--no-install', *extra]
             result = subprocess.run(command, cwd=repo, env=env, capture_output=True, text=True, timeout=180)
             print(result.stdout, flush=True)
             assert (result.returncode == 0) == success, (result.returncode, result.stdout, result.stderr)

@@ -18,10 +18,12 @@ PREPARED=()
 SHARED_RUNTIME=""
 REUSE_ENV="${RECAM_REFINE_REUSE_ENV:-0}"
 REUSE_SELECTOR=()
+ENV_CHECK=()
 if [[ -n "${RECAM_REFINE_PYTHON:-}" || -n "${RECAM_REFINE_ENV_NAME:-}" ]]; then REUSE_ENV=1; fi
 EXTRA=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --no-install) REUSE_ENV=1; ENV_CHECK=(--check-only); shift ;;
     --reuse-env) REUSE_ENV=1; shift ;;
     --python|--conda-env)
       if [[ $# -lt 2 || -z "$2" || "$2" == --* || ${#REUSE_SELECTOR[@]} -gt 0 ]]; then
@@ -134,7 +136,7 @@ mkdir -p "$WORK_DIR"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
 if [[ "$STEP" == exclude-6795 ]]; then
   if [[ "$REUSE_ENV" == 1 ]]; then
-    python3 -m recam_refine.environment "$WORK_DIR" --profile base "${REUSE_SELECTOR[@]}" --exec \
+    python3 -m recam_refine.environment "$WORK_DIR" --profile base "${REUSE_SELECTOR[@]}" "${ENV_CHECK[@]}" --exec \
       -m recam_refine.exclude_episode --root "$DATASET" --work-dir "$WORK_DIR" "$@" \
       2>&1 | tee -a "$WORK_DIR/step_exclude_6795.log"
   else
@@ -157,7 +159,7 @@ if [[ "$REUSE_ENV" == 1 ]]; then
   COMMAND=(run-step "$STEP")
   if [[ "$STEP" == transfer ]]; then COMMAND=(transfer-depth); fi
   python3 -m recam_refine.environment "$WORK_DIR" --profile "$PROFILE" \
-    --cache-work-dir "$LOG_WORK" "${REUSE_SELECTOR[@]}" --exec \
+    --cache-work-dir "$LOG_WORK" "${REUSE_SELECTOR[@]}" "${ENV_CHECK[@]}" --exec \
     -m recam_refine "${COMMAND[@]}" "$DATASET" --work-dir "$WORK_DIR" "$@" \
     2>&1 | tee -a "$LOG_WORK/step_${STEP}.log"
   exit 0

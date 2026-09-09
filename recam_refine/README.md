@@ -29,6 +29,8 @@ CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行
 
 每步都有独立日志和完成标志；中断后使用相同命令和 work_dir 恢复。
 
+**按机器的一键入口**：参见 [MACHINE_RUNBOOK.md](MACHINE_RUNBOOK.md)。CPU 执行仓库根目录 `run_prepare.sh`，两台 GPU 分别执行 `run_gpu1.sh` / `run_gpu2.sh`，最后 CPU 执行 `run_cpu_finish.sh`。自动加载飞书中的路径、复用已准备环境并衔接成功记录；支持 `--dry-run` 预览。
+
 `run_step.sh` 输出状态（`RUNNING` / `SUCCESS` / `FAILED`）、本次步骤耗时，以及当前子阶段的真实完成数/总数。子阶段注明单位（episode、文件、TAR 等），不会混合成虚假的总体百分比。准备输入等单项任务使用 0/1；该数字表示任务数而非数据处理量。批量处理完成后更新计数，最长每 30 秒刷新当前计数和耗时；不再输出 PID 或“进程存活”。Python 输出关闭缓冲。中断重跑时耗时从本次启动计起，已缓存条目通过检查后也计入完成数。
 
 CPU 步骤日志为 `$RECAM_WORK/step_<step>.log`（排除步骤为 `step_exclude_6795.log`）；GPU 分片日志位于各自 worker 目录的 `step_shard-refine.log`。独立时间戳扫描在 JSON 报告旁生成同名 `.log`，每 1000 条记录报告进度，也会定时刷新耗时和进度。可另开终端执行 `tail -f "$RECAM_WORK/step_exclude_6795.log"` 查看。
