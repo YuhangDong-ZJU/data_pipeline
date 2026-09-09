@@ -54,7 +54,12 @@ assert '--no-install' in sys.argv and '--python' in sys.argv
 if os.environ.get('FAIL_STEP')==stage: raise SystemExit(17)
 if stage=='shard-refine':
     shard=sys.argv[sys.argv.index('--shard-id')+1]
-    (work/f'gpu{shard}.done').touch(); raise SystemExit(0)
+    (work/f'gpu{shard}.done').touch()
+    plan=json.loads((work/'shards/plan.json').read_text()); part=plan['shards'][int(shard)]
+    directory=work/f'shards/results/shard-{int(shard):05d}'; (directory/'cameras').mkdir(parents=True,exist_ok=True)
+    (directory/'COMPLETE.json').write_text(json.dumps({'complete':True,'plan_id':plan['plan_id'],
+      'shard_id':int(shard),'manifest_sha256':part['sha256'],'candidate_sha256':{}}))
+    raise SystemExit(0)
 if stage=='shard-merge' and not all((work/f'gpu{i}.done').exists() for i in (0,1)):
     raise SystemExit(19)
 markers={'exclude-6795':'exclude_episode_006795/SUCCESS.json','transfer':'STEP1_DEPTH_TRANSFER_SUCCESS.json',
@@ -64,7 +69,12 @@ markers={'exclude-6795':'exclude_episode_006795/SUCCESS.json','transfer':'STEP1_
 p=work/markers[stage]; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'root':root,'complete':True}))
 if stage=='shard-plan':
     plan=work/'shards/plan.json'; plan.parent.mkdir(exist_ok=True)
-    plan.write_text(json.dumps({'shards':[{'shard_id':0},{'shard_id':1}],'settings':{'backend':'batched'}}))
+    parts=[]
+    for i in (0,1):
+        manifest=work/f'shards/manifest{i}.json'; manifest.write_text('{}')
+        parts.append({'shard_id':i,'path':str(manifest.relative_to(work)),
+                      'sha256':hashlib.sha256(manifest.read_bytes()).hexdigest(),'episodes':[]})
+    plan.write_text(json.dumps({'plan_id':'test','shards':parts,'settings':{'backend':'batched'}}))
     p.write_text(json.dumps({'plan_sha256':hashlib.sha256(plan.read_bytes()).hexdigest(),'complete':True}))
 ''')
 
@@ -82,7 +92,8 @@ if stage=='shard-plan':
         self.assertEqual([r[0] for r in self.trace()],['environment','environment','exclude-6795',
                          'transfer','unpack','align','overlap','shard-plan'])
         saved = self.trace()
-        self.launch('prepare')
+        result=self.launch('prepare')
+        self.assertIn('已完成，因此跳过',result.stdout)
         self.assertEqual(self.trace(),saved)
         self.launch('gpu1')
         self.launch('cpu_finish',success=False)
@@ -94,8 +105,17 @@ if stage=='shard-plan':
         count=len(stages)
         self.launch('cpu_finish')
         self.assertEqual(len(self.trace()),count)
+        for machine in ('gpu1','gpu2'):
+            result=self.launch(machine)
+            self.assertIn('已完成，因此跳过',result.stdout)
+        self.assertEqual(len(self.trace()),count)
         self.assertEqual(stages.count('check'),1)
         self.assertEqual(stages.count('environment'),2)
+        candidate=self.work/'shards/results/shard-00000/cameras/episode_999999.json'
+        candidate.write_text('{}')
+        result=self.launch('gpu1',success=False)
+        self.assertIn('coverage changed',result.stderr+result.stdout)
+        self.assertEqual(len(self.trace()),count)
 
     def test_failed_preparation_resumes_without_repeating_mutations(self):
         self.launch('prepare',success=False,FAIL_STEP='align')

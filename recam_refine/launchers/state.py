@@ -85,6 +85,27 @@ def scan_report():
     return p.resolve()
 
 
+def shard_done(shard):
+    work = Path(os.environ['RECAM_WORK'])
+    plan = read(work/'shards/plan.json')
+    part = plan['shards'][shard]
+    directory = work/f'shards/results/shard-{shard:05d}'
+    if not (directory/'COMPLETE.json').exists():
+        return False
+    receipt = read(directory/'COMPLETE.json')
+    if (receipt.get('complete') is not True or receipt['plan_id'] != plan['plan_id'] or
+            receipt['shard_id'] != shard or receipt['manifest_sha256'] != part['sha256'] or
+            digest(work/part['path']) != part['sha256']):
+        raise ValueError('Completed shard identity or manifest changed')
+    expected = {f'episode_{i:06d}.json' for i in part['episodes']}
+    if expected != set(receipt['candidate_sha256']) or expected != {p.name for p in (directory/'cameras').glob('*.json')}:
+        raise ValueError('Completed shard candidate coverage changed')
+    for name, checksum in receipt['candidate_sha256'].items():
+        if digest(directory/'cameras'/name) != checksum:
+            raise ValueError(f'Completed shard candidate changed: {name}')
+    return True
+
+
 def ready(save=False):
     work = Path(os.environ['RECAM_WORK'])
     target = work/'launchers/PREPARE_READY.json'
@@ -119,13 +140,15 @@ def ready(save=False):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=('paths','marker','scan-report','ready','save-ready','python'))
+    p.add_argument('action', choices=('paths','marker','scan-report','ready','save-ready','python','shard-done'))
     p.add_argument('value', nargs='?')
     args = p.parse_args()
     if args.action == 'paths':
         validate_paths()
     elif args.action == 'marker':
         return 0 if marker(args.value) else 3
+    elif args.action == 'shard-done':
+        return 0 if shard_done(int(args.value)) else 3
     elif args.action == 'scan-report':
         report = scan_report()
         if report is None:

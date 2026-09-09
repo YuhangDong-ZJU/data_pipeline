@@ -38,7 +38,7 @@ step() {
   shift 2
   CURRENT="$name"
   if done_marker "$marker"; then
-    printf '[%s] 已完成，跳过：%s\n' "$GROUP" "$name"
+    printf '[%s] SKIPPED step=%s：已完成，因此跳过（成功记录：%s）\n' "$GROUP" "$name" "$marker"
   else
     run bash recam_refine/run_step.sh "$name" "$RECAM_ROOT" "$RECAM_WORK" \
       --python "$SHARED_PYTHON" --no-install "$@"
@@ -63,7 +63,10 @@ if [[ "$GROUP" == prepare ]]; then
   # A completed preparation is immutable while either GPU is running.
   if done_marker launchers/PREPARE_READY.json; then
     "${STATE[@]}" ready >/dev/null
-    echo 'PREPARE already complete; run GPU1 and GPU2. No environment or data changes.'
+    for name in shared-environment timestamp-scan exclude-6795 transfer unpack align overlap shard-plan; do
+      printf '[prepare] SKIPPED step=%s：已完成，因此跳过（准备记录已核对）\n' "$name"
+    done
+    printf '[prepare] SUCCESS elapsed=%ss\n' "$((SECONDS-STARTED))"
     exit 0
   fi
   CURRENT='prepare shared environment'
@@ -76,7 +79,9 @@ if [[ "$GROUP" == prepare ]]; then
   export RECAM_REFINE_PYTHON="$SHARED_PYTHON"
   run python3 -m recam_refine.environment "$RECAM_WORK" --profile cpu --python "$SHARED_PYTHON"
 
-  if ! done_marker exclude_episode_006795/SUCCESS.json; then
+  if done_marker exclude_episode_006795/SUCCESS.json; then
+    echo '[prepare] SKIPPED step=timestamp-scan/exclude-6795：已完成排除，因此跳过扫描和排除'
+  else
     CURRENT='timestamp scan'
     SCAN_REPORT="$RECAM_WORK/depth_timestamp_scan_2_13_$(date +%Y%m%d_%H%M%S)_$$.json"
     scan_rc=3
@@ -113,6 +118,17 @@ else
       shard=0; worker="$WORKER_A"
       if [[ "$GROUP" == gpu2 ]]; then shard=1; worker="$WORKER_B"; fi
       CURRENT="shard-refine $shard"
+      if [[ "$DRY_RUN" == 0 ]]; then
+        shard_rc=0
+        "${STATE[@]}" shard-done "$shard" || shard_rc=$?
+        if [[ "$shard_rc" == 0 ]]; then
+          printf '[%s] SKIPPED step=shard-refine shard=%s：已完成，因此跳过（分片记录和结果哈希已核对）\n' "$GROUP" "$shard"
+          printf '[%s] SUCCESS elapsed=%ss\n' "$GROUP" "$((SECONDS-STARTED))"
+          exit 0
+        elif [[ "$shard_rc" != 3 ]]; then
+          exit "$shard_rc"
+        fi
+      fi
       # Existing per-shard locks prevent duplicate workers. The GPU profile
       # verifies actual CUDA availability without installing or updating packages.
       run bash recam_refine/run_step.sh shard-refine "$RECAM_ROOT" "$RECAM_WORK" \
