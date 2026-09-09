@@ -78,6 +78,21 @@ if stage=='shard-plan':
     p.write_text(json.dumps({'plan_sha256':hashlib.sha256(plan.read_bytes()).hexdigest(),'complete':True}))
 ''')
 
+        # A local bare origin exercises real fetch/pull without network access.
+        self.origin = self.base/'origin.git'
+        self.git('init','--bare',str(self.origin),cwd=self.base)
+        self.git('init','-b','codex/recam-dataset-refine')
+        self.git('config','user.email','test@example.invalid')
+        self.git('config','user.name','Launcher Test')
+        self.git('add','.')
+        self.git('commit','-m','initial fixture')
+        self.git('remote','add','origin',str(self.origin))
+        self.git('push','-u','origin','codex/recam-dataset-refine')
+
+    def git(self,*args,cwd=None):
+        return subprocess.run(['git',*args],cwd=cwd or self.repo,check=True,
+                              capture_output=True,text=True).stdout
+
     def launch(self, name, *args, success=True, **extra):
         result = subprocess.run(['bash',str(self.repo/f'run_{name}.sh'),*args],
                                 env={**self.env,**extra},capture_output=True,text=True,timeout=30)
@@ -155,6 +170,34 @@ if stage=='shard-plan':
             self.launch('prepare',success=False)
             self.launch('cpu_finish',success=False)
         self.launch('cpu_finish')
+
+    def test_pull_new_entry_then_skip_completed_data_steps(self):
+        self.launch('prepare')
+        previous = [r[0] for r in self.trace() if r[0]!='environment']
+        publisher=self.base/'publisher'
+        self.git('clone',str(self.origin),str(publisher),cwd=self.base)
+        self.git('switch','codex/recam-dataset-refine',cwd=publisher)
+        self.git('config','user.email','test@example.invalid',cwd=publisher)
+        self.git('config','user.name','Launcher Test',cwd=publisher)
+        entry=publisher/'run_prepare.sh'
+        entry.write_text(entry.read_text().replace('set -Eeuo pipefail','set -Eeuo pipefail\necho NEW_ENTRY_EXECUTED'))
+        self.git('add','run_prepare.sh',cwd=publisher)
+        self.git('commit','-m','update entry',cwd=publisher)
+        self.git('push','origin','codex/recam-dataset-refine',cwd=publisher)
+        result=self.launch('prepare')
+        self.assertIn('NEW_ENTRY_EXECUTED',result.stdout)
+        self.assertIn('已完成，因此跳过',result.stdout)
+        self.assertEqual(previous,[r[0] for r in self.trace() if r[0]!='environment'])
+        self.assertTrue((self.work/'launchers/code_updates.jsonl').is_file())
+        self.launch('gpu1')
+
+    def test_local_tracked_changes_stop_update_before_processing(self):
+        entry=self.repo/'run_gpu1.sh'
+        entry.write_text(entry.read_text()+'\n# local edit\n')
+        result=self.launch('prepare',success=False)
+        self.assertIn('tracked local changes',result.stdout+result.stderr)
+        self.assertFalse((self.work/'trace.jsonl').exists())
+        self.assertIn('# local edit',entry.read_text())
 
 
 if __name__ == '__main__':

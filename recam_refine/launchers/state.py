@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 PATHS = ('RECAM_ROOT', 'RECAM_WORK', 'DEPTH_OUTPUT', 'WORKER_A', 'WORKER_B')
 OPTIONS = ('ALIGN_WORKERS', 'CHECK_WORKERS', 'REPACK_WORKERS', 'AUDIT_FRAMES',
@@ -106,7 +107,7 @@ def shard_done(shard):
     return True
 
 
-def ready(save=False):
+def ready(save=False, allow_update=False, refresh=False):
     work = Path(os.environ['RECAM_WORK'])
     target = work/'launchers/PREPARE_READY.json'
     plan = read(work/'shards/plan.json')
@@ -129,18 +130,27 @@ def ready(save=False):
     value = read(target)
     if value['config'] != configuration():
         raise ValueError('Shared paths/options changed after preparation; restore the original configuration')
-    if value['code_sha256'] != code_digest():
+    current_code = code_digest()
+    if value['code_sha256'] != current_code and not allow_update:
         raise ValueError('Processing code changed after preparation; do not update code during this run')
     if value['plan_sha256'] != digest(work/'SHARD_PLAN_READY.json'):
         raise ValueError('The fixed shard plan changed')
     if not Path(value['python']).is_file():
         raise ValueError(f"Prepared shared Python is not visible on this host: {value['python']}")
+    if refresh and value['code_sha256'] != current_code:
+        with (work/'launchers/code_updates.jsonl').open('a',encoding='utf-8') as stream:
+            stream.write(json.dumps(dict(previous=value, new_code_sha256=current_code, timestamp=time.time()))+'\n')
+        value['code_sha256'] = current_code
+        part = target.with_suffix('.part')
+        part.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')
+        part.replace(target)
     return value['python']
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=('paths','marker','scan-report','ready','save-ready','python','shard-done'))
+    p.add_argument('action', choices=('paths','marker','scan-report','ready','save-ready','python','shard-done',
+                                     'ready-compatible','refresh-code','code-current'))
     p.add_argument('value', nargs='?')
     args = p.parse_args()
     if args.action == 'paths':
@@ -156,8 +166,12 @@ def main():
         print(report)
     elif args.action == 'python':
         print(read(Path(os.environ['RECAM_WORK'])/f'runtime_cache/environment_{args.value}.json')['python'])
+    elif args.action == 'code-current':
+        value=read(Path(os.environ['RECAM_WORK'])/'launchers/PREPARE_READY.json')
+        return 0 if value['code_sha256']==code_digest() else 3
     else:
-        print(ready(save=args.action == 'save-ready'))
+        print(ready(save=args.action == 'save-ready', allow_update=args.action in ('ready-compatible','refresh-code'),
+                    refresh=args.action == 'refresh-code'))
     return 0
 
 

@@ -49,12 +49,45 @@ if [[ "$DRY_RUN" == 0 ]]; then
   command -v flock >/dev/null || { echo 'ERROR: flock is required (Debian util-linux)' >&2; exit 1; }
   mkdir -p "$RECAM_WORK/launchers"
   # Install tee before acquiring the lease, so the logger cannot retain the lock.
-  exec > >(tee -a "$RECAM_WORK/launchers/run_${GROUP}.log") 2>&1
-  exec 9>"$RECAM_WORK/launchers/workflow.lock"
+  if [[ -z "${RECAM_UPDATED_LOCK:-}" ]]; then
+    exec > >(tee -a "$RECAM_WORK/launchers/run_${GROUP}.log") 2>&1
+  fi
+  if [[ "${RECAM_UPDATED_LOCK:-}" != "$RECAM_WORK/launchers/workflow.lock" ]]; then
+    exec 9>"$RECAM_WORK/launchers/workflow.lock"
+  else
+    [[ "$GROUP" == prepare && -e /proc/$$/fd/9 ]] || { echo 'ERROR: missing update lock'; exit 1; }
+  fi
   case "$GROUP" in
     gpu1|gpu2) flock --shared --nonblock 9 ;;
     *) flock --exclusive --nonblock 9 ;;
   esac
+fi
+# This function is fully parsed before Git can replace this file. The exec
+# below enters the newly pulled scripts and preserves the exclusive lease.
+update_and_restart() {
+  CURRENT='update code'
+  git diff --quiet && git diff --cached --quiet || {
+    echo 'ERROR: tracked local changes exist; preserve/resolve them before updating. Nothing was reset.' >&2
+    exit 1
+  }
+  echo '[prepare] RUNNING step=git-update'
+  git fetch origin codex/recam-dataset-refine
+  git switch codex/recam-dataset-refine
+  git pull --ff-only origin codex/recam-dataset-refine
+  git log -1 --oneline
+  export RECAM_UPDATED_LOCK="$RECAM_WORK/launchers/workflow.lock"
+  echo '[prepare] SUCCESS step=git-update；重新进入最新脚本'
+  exec bash "$REPO_DIR/run_prepare.sh"
+}
+if [[ "$GROUP" == prepare && -z "${RECAM_UPDATED_LOCK:-}" ]]; then
+  if [[ "$DRY_RUN" == 1 ]]; then
+    echo '+ git fetch origin codex/recam-dataset-refine'
+    echo '+ git switch codex/recam-dataset-refine'
+    echo '+ git pull --ff-only origin codex/recam-dataset-refine'
+    echo '+ 重新进入更新后的 run_prepare.sh，然后按成功记录恢复'
+  else
+    update_and_restart
+  fi
 fi
 printf '[%s] RUNNING elapsed=0s\nREPO_DIR=%s\nRECAM_ROOT=%s\nRECAM_WORK=%s\n' \
   "$GROUP" "$REPO_DIR" "$RECAM_ROOT" "$RECAM_WORK"
@@ -62,6 +95,22 @@ printf '[%s] RUNNING elapsed=0s\nREPO_DIR=%s\nRECAM_ROOT=%s\nRECAM_WORK=%s\n' \
 if [[ "$GROUP" == prepare ]]; then
   # A completed preparation is immutable while either GPU is running.
   if done_marker launchers/PREPARE_READY.json; then
+    # Only CPU preparation holds the exclusive update lease. Validate the old
+    # paths/plan before accepting updated code; never discard completion records.
+    if [[ -n "${RECAM_UPDATED_LOCK:-}" ]]; then
+      SHARED_PYTHON="$("${STATE[@]}" ready-compatible)"
+      code_rc=0
+      "${STATE[@]}" code-current || code_rc=$?
+      if [[ "$code_rc" == 3 ]]; then
+        unset RECAM_REFINE_ENV_NAME
+        export RECAM_REFINE_PYTHON="$SHARED_PYTHON"
+        run python3 -m recam_refine.environment "$RECAM_WORK" --profile prepare-gpu --python "$SHARED_PYTHON"
+        run python3 -m recam_refine.environment "$RECAM_WORK" --profile cpu --python "$SHARED_PYTHON"
+        "${STATE[@]}" refresh-code >/dev/null
+      elif [[ "$code_rc" != 0 ]]; then
+        exit "$code_rc"
+      fi
+    fi
     "${STATE[@]}" ready >/dev/null
     for name in shared-environment timestamp-scan exclude-6795 transfer unpack align overlap shard-plan; do
       printf '[prepare] SKIPPED step=%s：已完成，因此跳过（准备记录已核对）\n' "$name"

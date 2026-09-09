@@ -4,14 +4,14 @@
 
 | 机器 | 入口 | 自动顺序 |
 |---|---|---|
-| CPU，先执行 | `run_prepare.sh` | 复用并补齐一套共享环境 → 自动定位已有报告或扫描 chunk 2–13 → 排除已确认的源 episode 6795 → 迁移 → 解压 → 对齐 → PointWorld 重合统计 → 两个固定分片 |
+| CPU，先执行 | `run_prepare.sh` | 自动拉取最新代码并重新进入新版 → 复用并补齐一套共享环境 → 自动定位已有报告或扫描 chunk 2–13 → 排除已确认的源 episode 6795 → 迁移 → 解压 → 对齐 → PointWorld 重合统计 → 两个固定分片；已完成的数据步骤跳过 |
 | GPU 机器 1 | `run_gpu1.sh` | 只检查已准备环境，运行分片 0，使用本机可见 GPU 0–7 |
 | GPU 机器 2 | `run_gpu2.sh` | 只检查已准备环境，运行分片 1，使用本机可见 GPU 0–7 |
 | CPU，两台 GPU 成功后 | `run_cpu_finish.sh` | 合并 → 写回外参 → 全量校验与每 episode 最多 24 帧几何审计 → 清理 → 每 TAR 最多 250 个 episode 的 DROID 外部相机 depth 打包 |
 
 GPU1/GPU2 指两台机器，不是单张显卡。两台 GPU 可同时运行。入口不会自动开机、SSH 或跨机器启动任务。
 
-## 1. 首次在 CPU 上更新代码
+## 1. 仅当旧仓库还没有新版入口时：首次获取入口
 
 ```bash
 cd /mnt/bn/yuyingchen/moranli/Code/Research/ModelArch/data_pipeline
@@ -21,7 +21,7 @@ git switch codex/recam-dataset-refine &&
 git pull --ff-only origin codex/recam-dataset-refine
 ```
 
-以上成功后再执行下面命令。保留本地修改；不要 reset/clean。Git 更新必须在所有处理任务停止时执行。入口脚本不会在运行过程中自行更新代码。
+以上成功后再执行下面命令。这段只用于取得支持自动更新的新版入口；之后无需手动执行 Git 命令。保留本地修改；不要 reset/clean。
 
 ## 2. CPU：一次完成所有准备
 
@@ -29,6 +29,10 @@ git pull --ff-only origin codex/recam-dataset-refine
 cd /mnt/bn/yuyingchen/moranli/Code/Research/ModelArch/data_pipeline
 bash run_prepare.sh
 ```
+
+每次启动先取得工作流独占锁，自动 `git fetch`、切换到 `codex/recam-dataset-refine`、`git pull --ff-only`，然后重新进入刚拉下来的入口，保留锁和日志。网络失败、非快进或存在未提交的已跟踪文件修改时停止，不继续用旧代码处理数据，不会强制覆盖本地内容。GPU 正在运行时无法取得独占锁，因此不会更新共享代码。
+
+更新后保留全部成功记录与断点；原路径和分片计划必须一致。若处理代码摘要发生变化，在 CPU 上复核共享环境要求、仅补齐缺项，并将版本变更记录到 `$RECAM_WORK/launchers/code_updates.jsonl`，再逐项跳过已完成的数据步骤。代码无变化且准备已完成时，直接提示跳过。GPU 和收尾入口不自行拉代码；需要更新时，先停止所有任务，再运行 `run_prepare.sh`。
 
 优先选择已有 PyTorch 2.8.0+cu129 环境，补装缺项，并将 CPU 校验依赖补齐到同一解释器；保留已有包版本，遇到不兼容版本停止。CPU 无需 NVIDIA 驱动。准备结果存入 `$RECAM_WORK/launchers/PREPARE_READY.json`。所有机器须能访问其中记录的相同绝对路径。
 
@@ -72,7 +76,7 @@ bash run_gpu2.sh --dry-run
 bash run_cpu_finish.sh --dry-run
 ```
 
-报错后修复原因，再运行同一入口。已有旧版逐步执行记录也会被识别；若数据已经推进到后续阶段，不重新执行排除。中途不要切换路径、改变固定参数、重新分片或更新处理代码。首次准备完成后会冻结相关配置和代码摘要，变化时停止，避免两台机器使用不同版本。
+报错后修复原因，再运行同一入口。已有旧版逐步执行记录也会被识别；若数据已经推进到后续阶段，不重新执行排除。中途不要切换路径、改变固定参数或重新分片。首次准备完成后冻结路径、配置及分片计划；更新代码统一通过所有任务停止后的 `run_prepare.sh` 完成，GPU 入口仍拒绝未经准备入口复核的代码变更。
 
 可以从 `run_prepare.sh` 开始依次重跑四个入口：已成功的步骤打印 `SKIPPED ... 已完成，因此跳过`，未完成的步骤恢复执行。准备全部完成时逐项提示跳过；即使 CPU 收尾已完成，GPU 入口也会在核对原分片记录与候选结果哈希后跳过，不要求重新初始化 GPU。记录或结果不一致时明确报错，不把“存在文件”误当作可跳过的成功结果。
 
