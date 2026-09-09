@@ -53,7 +53,7 @@ if [[ "$REUSE_ENV" == 1 && -n "$SHARED_RUNTIME" ]]; then
   echo 'ERROR: --reuse-env selects an existing environment; omit --runtime-work-dir, or use --python with its env/bin/python.' >&2; exit 2
 fi
 if [[ "$REUSE_ENV" == 0 ]]; then unset LD_PRELOAD LD_LIBRARY_PATH; fi
-case "$STEP" in transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|repack|status) ;; *) echo "Unknown step: $STEP" >&2; exit 2 ;; esac
+case "$STEP" in exclude-6795|transfer|unpack|align|overlap|refine|shard-plan|shard-refine|shard-merge|shard-status|apply|check|cleanup|repack|status) ;; *) echo "Unknown step: $STEP" >&2; exit 2 ;; esac
 if [[ -n "$SHARED_RUNTIME" && "$STEP" != shard-refine ]]; then
   echo 'ERROR: --runtime-work-dir is supported only by shard-refine; keep the CPU coordinator runtime separate.' >&2; exit 2
 fi
@@ -124,6 +124,18 @@ PY
 fi
 mkdir -p "$WORK_DIR"
 WORK_DIR="$(cd "$WORK_DIR" && pwd)"
+if [[ "$STEP" == exclude-6795 ]]; then
+  if [[ "$REUSE_ENV" == 1 ]]; then
+    python3 -m recam_refine.environment "$WORK_DIR" --profile base "${REUSE_SELECTOR[@]}" --exec \
+      -m recam_refine.exclude_episode --root "$DATASET" --work-dir "$WORK_DIR" "$@" \
+      2>&1 | tee -a "$WORK_DIR/step_exclude_6795.log"
+  else
+    python3 recam_refine/bootstrap.py "$WORK_DIR" "${PREPARED[@]}" --exec \
+      -m recam_refine.exclude_episode --root "$DATASET" --work-dir "$WORK_DIR" "$@" \
+      2>&1 | tee -a "$WORK_DIR/step_exclude_6795.log"
+  fi
+  exit 0
+fi
 if [[ "$REUSE_ENV" == 1 ]]; then
   PROFILE=base
   case "$STEP" in

@@ -91,9 +91,10 @@ def canonical_manifest(path, episodes):
             for role in ("external_1", "external_2"):
                 require(role in r["camera_serials"], f"Missing camera serial: {i}:{role}")
             rows[i] = r
-    ids = {int(e["episode_index"]) for e in episodes}
+    mapping = {int(e['episode_index']): int(e.get('source_episode_index', e['episode_index'])) for e in episodes}
+    ids = set(mapping.values())
     require(ids <= rows.keys(), f"Manifest misses episodes: {sorted(ids - rows.keys())[:20]}")
-    selected = {i: rows[i] for i in ids}
+    selected = {i: dict(rows[original], episode_index=i, source_episode_index=original) for i, original in mapping.items()}
     require(len({r["source_episode_id"] for r in selected.values()}) == len(selected), "Duplicated source UUID")
     for e in episodes:
         r = selected[e["episode_index"]]
@@ -106,6 +107,7 @@ def canonical_manifest(path, episodes):
 
 def load_depth_records(roots, manifest):
     records = {}
+    source_to_current = {int(r.get('source_episode_index', i)): i for i, r in manifest.items()}
     roots = list(dict.fromkeys(Path(p).resolve() for p in roots))
     for root in roots:
         nested = root / "annotations/foundation_stereo_depth"
@@ -115,9 +117,10 @@ def load_depth_records(roots, manifest):
         for p in root.glob("chunk-*/observation.images.depth_*/episode_*.json"):
             d = read_json(p)
             src = d["source"]
-            i = int(src["episode_index"])
-            if i not in manifest:
+            original = int(src["episode_index"])
+            if original not in source_to_current:
                 continue
+            i = source_to_current[original]
             role = src["camera_role"]
             if role not in ("external_1", "external_2"):
                 continue

@@ -140,11 +140,13 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
     # Check all streams before moving any dataset file. Receipts also support
     # recovery when an earlier invocation moved only part of a directory.
     for i in sorted(manifest):
-        if i // 1000 not in chunks:
+        original = int(manifest[i].get('source_episode_index', i))
+        if original // 1000 not in chunks:
             continue
         for cam in (1,2):
             rel = Path(f'images/chunk-{i//1000:03d}/observation.images.depth_{cam:02d}/episode_{i:06d}')
-            src, dst = safe_path(source,rel), safe_path(droid,rel)
+            src = safe_path(source, f'images/chunk-{original//1000:03d}/observation.images.depth_{cam:02d}/episode_{original:06d}')
+            dst = safe_path(droid,rel)
             require((i,cam) in records, f'Source depth sidecar missing: episode {i}/{cam} under {source}')
             receipt_path = work/'transfer_receipts'/f'episode_{i:06d}_{cam}.json'
             if receipt_path.exists():
@@ -172,11 +174,12 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
                         f'Neither source nor target matches transfer receipt: {p}')
     log('Depth transfer preflight passed; all selected streams verified')
     for i, row in sorted(manifest.items()):
-        if i // 1000 not in chunks:
+        original = int(row.get('source_episode_index', i))
+        if original // 1000 not in chunks:
             continue
         for cam in (1, 2):
             rel = Path(f"images/chunk-{i//1000:03d}/observation.images.depth_{cam:02d}/episode_{i:06d}")
-            src = safe_path(source, rel)
+            src = safe_path(source, f'images/chunk-{original//1000:03d}/observation.images.depth_{cam:02d}/episode_{original:06d}')
             dst = safe_path(droid, rel)
             require((i, cam) in records, f"Source depth sidecar missing: episode {i}/{cam} under {source}")
             receipt_path = work / "transfer_receipts" / f"episode_{i:06d}_{cam}.json"
@@ -557,7 +560,7 @@ def _run_locked(args):
     info = corrected_droid_info(droid, read_json(work / "original_droid_info.json"))
     manifest_path, camera_dir = args.episode_manifest, args.pointworld_cameras
     if manifest_path is None or camera_dir is None:
-        auto_manifest, auto_cameras = download_inputs(work, sorted({e["episode_index"] // info["chunks_size"] for e in episodes}))
+        auto_manifest, auto_cameras = download_inputs(work, sorted({int(e.get('source_episode_index', e['episode_index'])) // info["chunks_size"] for e in episodes}))
         manifest_path = manifest_path or auto_manifest
         camera_dir = camera_dir or auto_cameras
     manifest = canonical_manifest(manifest_path, episodes)

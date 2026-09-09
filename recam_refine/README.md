@@ -6,6 +6,9 @@
 
 ## 推荐：每次只执行一个功能
 
+扫描确认仅源 episode 6795 异常时，在迁移前执行 [整 episode 排除步骤](EXCLUDE_EPISODE.md)：
+`run_step.sh exclude-6795`。该步骤保留备份，处理共享 TAR、连续编号与统计，并保留原始源编号映射。
+
 已有 clone 的更新命令、每一步的命令和完成标志，见 **[STEP_BY_STEP.md](STEP_BY_STEP.md)**。
 CPU/GPU 机器分工、在 CPU 上提前安装 GPU 环境、两台 GPU 只运行优化，见 **[CPU_GPU_STAGES.md](CPU_GPU_STAGES.md)**。
 两台 GPU 可通过 `--runtime-work-dir` 共用一套预装环境，各自保留独立的 worker 日志、断点和缓存。

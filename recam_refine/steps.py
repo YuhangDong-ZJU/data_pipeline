@@ -18,7 +18,7 @@ def transfer_configuration(root, source, chunks, manifest):
     return dict(root=str(Path(root).resolve()),depth_output=str(Path(source).resolve()),chunks=sorted(chunks),
         identities=[dict(episode_index=i,source_episode_id=r['source_episode_id'],length=int(r['length']),
                          camera_serials={c:str(r['camera_serials'][c]) for c in ('external_1','external_2')})
-                    for i,r in sorted(manifest.items()) if i//1000 in chunks])
+                    for i,r in sorted(manifest.items()) if int(r.get('source_episode_index',i))//1000 in chunks])
 
 
 def transferred_streams(root, work):
@@ -34,6 +34,9 @@ def transferred_streams(root, work):
 
 
 def manual_workflow(root, work):
+    exclusion = work/'exclude_episode_006795'
+    require(not (exclusion/'plan.json').exists() or (exclusion/'SUCCESS.json').exists(),
+            'Episode exclusion was interrupted; resume exclude-6795 before other steps')
     require(not (work/'configuration.json').exists(), 'This work directory belongs to an automatic run; resume it with its original command')
     path = work/'manual_workflow.json'
     value = dict(version=1,root=str(root))
@@ -69,9 +72,9 @@ def transfer_only(args):
             info = read_json(info_path)
             require(info.get('codebase_version')=='v2.1' and info['chunks_size']==1000,
                     'Step 1 expects the ReCam LeRobot v2.1 / 1000-episode chunk layout')
-            episodes = [e for e in read_jsonl(episodes_path) if int(e['episode_index'])//1000 in chunks]
+            episodes = [e for e in read_jsonl(episodes_path) if int(e.get('source_episode_index',e['episode_index']))//1000 in chunks]
             require(episodes, f'No target episodes in chunks {args.depth_chunks}')
-            manifest_path = args.episode_manifest or download_manifest(work,sorted({e['episode_index']//1000 for e in episodes}))
+            manifest_path = args.episode_manifest or download_manifest(work,sorted({int(e.get('source_episode_index',e['episode_index']))//1000 for e in episodes}))
             manifest = canonical_manifest(manifest_path,episodes)
             config = transfer_configuration(root,source,chunks,manifest)
             config_path = work/'step1_configuration.json'
@@ -168,7 +171,7 @@ def align_only(root,work,args):
     episodes = read_json(work/'original_droid_episodes.json')
     require([e['episode_index'] for e in episodes]==list(range(len(episodes))),'DROID episode catalogue must be complete and ordered')
     info = corrected_droid_info(droid,read_json(work/'original_droid_info.json'))
-    manifest_path = args.episode_manifest or download_manifest(work,sorted({e['episode_index']//1000 for e in episodes}))
+    manifest_path = args.episode_manifest or download_manifest(work,sorted({int(e.get('source_episode_index',e['episode_index']))//1000 for e in episodes}))
     manifest = canonical_manifest(manifest_path,episodes)
     step1 = read_json(work/'step1_configuration.json')
     require(transfer_configuration(root,step1['depth_output'],set(step1['chunks']),manifest)==step1,'Step 1 episode mapping changed')

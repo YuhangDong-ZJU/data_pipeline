@@ -402,8 +402,15 @@ def _run_audit_locked(args):
     require(plan or not (root / "meta/refinement.jsonl").exists(),
             "This dataset is already refined; supply its original work directory to recover the true initial poses")
     manifest_path = args.episode_manifest or work / "inputs/episode_manifest.jsonl"
-    rows = {i:job["source"] for i, job in plan.items()} if plan and not args.episode_manifest else {
-        int(r["episode_index"]):r for r in read_jsonl(manifest_path)}
+    if plan and not args.episode_manifest:
+        rows = {i:job['source'] for i,job in plan.items()}
+    else:
+        available = {int(r['episode_index']):r for r in read_jsonl(manifest_path)}
+        catalogue = [e for e in read_jsonl(root/'meta/episodes.jsonl')
+                     if int(e.get('source_episode_index',e['episode_index'])) in available]
+        rows = {e['episode_index']:dict(available[int(e.get('source_episode_index',e['episode_index']))],
+                    episode_index=e['episode_index'],source_episode_index=int(e.get('source_episode_index',e['episode_index'])))
+                for e in catalogue}
     ids = sorted(rows) if args.episodes == ["all"] else sorted(set(map(int, args.episodes)))
     require(set(ids) <= rows.keys(), "An episode is missing from the source manifest")
     for i in ids:
