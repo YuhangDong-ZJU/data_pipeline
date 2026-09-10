@@ -126,7 +126,7 @@ def fetch_wheel(url, digest, path):
             time.sleep(2 ** attempt)
 
 
-def installer_environment(env, cache):
+def installer_environment(env, cache, python=None):
     result = dict(env)
     # Honor cluster network settings, but prevent pip configuration from sending
     # an install to --user, --target or another prefix or replacing old packages.
@@ -135,6 +135,19 @@ def installer_environment(env, cache):
     for key in list(result):
         if key.startswith('PIP_') and key not in network:
             result.pop(key)
+    # We discard pip's config file below so a stray install/target/prefix setting
+    # cannot redirect the installation. That also drops the cluster mirror's
+    # index-url, so read it from the effective config first and carry it forward
+    # as PIP_INDEX_URL; supplement() relies on it as the general-index fallback.
+    if python and 'PIP_INDEX_URL' not in result:
+        try:
+            probe = subprocess.run([python, '-m', 'pip', 'config', 'get', 'global.index-url'],
+                                   env=env, text=True, capture_output=True, timeout=30)
+            url = probe.stdout.strip()
+            if probe.returncode == 0 and re.match(r'https?://', url):
+                result['PIP_INDEX_URL'] = url
+        except (OSError, subprocess.SubprocessError):
+            pass
     result.update(PIP_CONFIG_FILE=os.devnull, PIP_DISABLE_PIP_VERSION_CHECK='1', PIP_NO_INPUT='1',
                   PIP_CACHE_DIR=str(cache / 'pip'), PIP_PROGRESS_BAR='off')
     return result
@@ -202,7 +215,7 @@ def supplement(python, snapshot, packages, profile, cache, env):
     constraints.write_text(''.join(f'{name}=={version}\n' for name, version in sorted(before.items())))
     requirements = attempt / 'required.txt'
     requirements.write_text('\n'.join(plan_requirements(snapshot, packages, profile)) + '\n')
-    install_env = installer_environment(env, cache)
+    install_env = installer_environment(env, cache, python)
     pip = pip_command(python, snapshot, cache)
 
     def run(*args, capture=False):
@@ -215,8 +228,19 @@ def supplement(python, snapshot, packages, profile, cache, env):
     baseline = run('check', capture=True)
     (attempt / 'pip_check_before.txt').write_text(baseline.stdout + baseline.stderr)
     report_file = attempt / 'plan.json'
-    index = ['--extra-index-url', 'https://download.pytorch.org/whl/' +
-             ('cpu' if profile == 'cpu' else 'cu129')] if 'torch' in packages and 'torch' not in before else []
+    index = []
+    if 'torch' in packages and 'torch' not in before:
+        # Use the PyTorch index as the primary source so the CUDA/CPU torch stack
+        # resolves from it, and keep the general index (cluster mirror if set,
+        # else PyPI) as the fallback. This ordering matters: torch's pure-Python
+        # deps (jinja2, markupsafe, ...) are published on the PyTorch index WITHOUT
+        # a sha256, and pip does not prefer a hashed candidate over an equal-version
+        # unhashed one. Making the general index the fallback lets those deps resolve
+        # from a hashed wheel, which validate_plan() requires ("Only hashed binary
+        # wheels may be installed").
+        general = install_env.get('PIP_INDEX_URL', 'https://pypi.org/simple')
+        index = ['--index-url', 'https://download.pytorch.org/whl/' +
+                 ('cpu' if profile == 'cpu' else 'cu129'), '--extra-index-url', general]
     run('install', '--dry-run', '--report', str(report_file), '--only-binary=:all:',
         '-c', str(constraints), '-r', str(requirements), *index)
     rows = validate_plan(json.loads(report_file.read_text()), before)
