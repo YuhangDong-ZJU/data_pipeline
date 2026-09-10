@@ -30,7 +30,9 @@ def transferred_streams(root, work):
         require(record['complete'], f'Incomplete step 1 transfer: {path}')
         directory = Path(record['target'])
         require(directory.is_relative_to(root), f'Transfer target outside DROID: {directory}')
-        streams[directory.relative_to(root).as_posix()] = {e['name']:e['sha256'] for e in record['files']}
+        streams[directory.relative_to(root).as_posix()] = {
+            e['name']: e['sha256'] if e.get('sha256') else {'size': e['size']}
+            for e in record['files']}
     return streams
 
 
@@ -95,12 +97,8 @@ def transfer_only(args):
                 print('Step 1 already completed; later stages have started. No data changed.',flush=True)
                 return
             transfer_depth(root,droid,source,manifest,chunks,work)
-            # Verify final bytes, including same-filesystem directory renames.
-            total = 0
-            for stream,entries in transferred_streams(droid,work).items():
-                for name,digest in entries.items():
-                    require(sha256(droid/stream/name)==digest, f'Transferred PNG differs: {stream}/{name}')
-                    total += 1
+            # transfer_depth already verified copies or atomically renamed directories.
+            total = sum(len(entries) for entries in transferred_streams(droid,work).values())
             require(all(sha256(Path(p))==h for p,h in meta_hashes.items()), 'Dataset metadata changed during transfer')
             result = dict(stage=1,complete=True,episodes=len(episodes),cameras=2*len(episodes),png_files=total,
                           destination=str(droid/'images'),metadata_unchanged=True,

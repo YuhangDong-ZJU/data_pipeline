@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
@@ -27,8 +28,13 @@ def download_manifest(work, chunks):
     chunks = list(chunks)
     for count, chunk in enumerate(chunks):
         phase('获取身份清单（chunk）', count, len(chunks), f'当前 chunk-{chunk:03d}；含网络请求和缓存检查')
-        path = hf_hub_download(repo,f'manifests/chunks/chunk-{chunk:03d}.jsonl',repo_type='dataset',
-                               revision=revisions[repo],local_dir=work/repo.split('/')[1])
+        kwargs = dict(repo_id=repo, filename=f'manifests/chunks/chunk-{chunk:03d}.jsonl', repo_type='dataset',
+                      revision=revisions[repo], local_dir=work/repo.split('/')[1])
+        from huggingface_hub.errors import LocalEntryNotFoundError
+        try:
+            path = hf_hub_download(**kwargs, local_files_only=True)
+        except LocalEntryNotFoundError:
+            path = hf_hub_download(**kwargs)
         rows.extend(read_jsonl(path))
         phase('获取身份清单（chunk）', count + 1, len(chunks))
     output = work/'transfer_episode_manifest.jsonl'
@@ -124,7 +130,8 @@ def load_depth_records(roots, manifest):
         paths = sorted(root.glob("chunk-*/observation.images.depth_*/episode_*.json"))
         phase('枚举深度 JSON（目录任务）', 1, 1, f'{root}；找到 {len(paths)} 个文件')
         for p in tracked(paths, '校验深度 JSON：身份、时间戳及 SHA256（文件）'):
-            d = read_json(p)
+            raw = p.read_bytes()
+            d = json.loads(raw)
             src = d["source"]
             original = int(src["episode_index"])
             if original not in source_to_current:
@@ -145,7 +152,7 @@ def load_depth_records(roots, manifest):
             require(all(a < b for a, b in zip(timestamps[:decoded-1], timestamps[1:decoded])), f"Unordered timestamps: {p}")
             require("FoundationStereo" in d["inference"]["method"], f"Wrong depth method: {p}")
             key = (i, int(role[-1]))
-            value = dict(path=str(p), sha256=sha256(p), frame_count=n, decoded=decoded, missing=missing,
+            value = dict(path=str(p), sha256=hashlib.sha256(raw).hexdigest(), frame_count=n, decoded=decoded, missing=missing,
                          intrinsic=d["calibration"]["intrinsic"], camera_serial=str(src["camera_serial"]))
             if key in records:
                 a = {k:v for k,v in records[key].items() if k not in ("path", "sha256")}

@@ -71,6 +71,19 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
             require(rel not in members, f"Duplicate TAR member: {rel}")
             members.add(rel)
             target = safe_path(subset, rel)
+            authority = authoritative_streams.get(PurePosixPath(rel).parent.as_posix())
+            if authority is not None:
+                if target.name in authority:
+                    expected = authority[target.name]
+                    require(target.is_file() and not target.is_symlink() and
+                            (target.stat().st_size == expected['size'] if isinstance(expected, dict)
+                             else sha256(target) == expected),
+                            f'Migrated depth changed before TAR extraction: {target}')
+                else:
+                    require(not target.exists(), f'Unexpected frame outside migrated depth stream: {target}')
+                # Old depth is superseded; do not extract/decode it only to discard it.
+                superseded += 1
+                continue
             target.parent.mkdir(parents=True, exist_ok=True)
             part = target.with_name("." + target.name + ".unpack-part")
             h = hashlib.sha256()
@@ -85,15 +98,7 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
                     os.fsync(dst.fileno())
                 require(size == member.size, f"Truncated TAR member: {rel}")
                 check_png(part)
-                authority = authoritative_streams.get(PurePosixPath(rel).parent.as_posix())
-                if authority is not None:
-                    if target.name in authority:
-                        require(target.is_file() and sha256(target)==authority[target.name],
-                                f'Migrated depth changed before TAR extraction: {target}')
-                    else:
-                        require(not target.exists(), f'Unexpected frame outside migrated depth stream: {target}')
-                    superseded += 1
-                elif target.exists():
+                if target.exists():
                     require(sha256(target) == h.hexdigest(), f"Existing PNG conflicts with TAR: {target}")
                 else:
                     os.replace(part, target)

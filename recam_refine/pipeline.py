@@ -132,105 +132,7 @@ def plan_episode(args):
                 depths=depths, videos=streams, initial_intrinsics=k[0].tolist(), initial_extrinsics=e[0].tolist())
 
 
-def transfer_depth(root, droid, source, manifest, chunks, work):
-    source = Path(source).resolve()
-    require(source.is_dir() and not source.is_relative_to(root) and not root.is_relative_to(source), "Depth output and dataset must be separate")
-    records = load_depth_records([source], manifest)
-    journal = Journal(root, work)
-    receipts = []
-    # Check all streams before moving any dataset file. Receipts also support
-    # recovery when an earlier invocation moved only part of a directory.
-    selected = [i for i in sorted(manifest) if int(manifest[i].get('source_episode_index',i))//1000 in chunks]
-    for i in tracked(selected,'迁移预检：episode'):
-        original = int(manifest[i].get('source_episode_index', i))
-        if original // 1000 not in chunks:
-            continue
-        for cam in (1,2):
-            rel = Path(f'images/chunk-{i//1000:03d}/observation.images.depth_{cam:02d}/episode_{i:06d}')
-            src = safe_path(source, f'images/chunk-{original//1000:03d}/observation.images.depth_{cam:02d}/episode_{original:06d}')
-            dst = safe_path(droid,rel)
-            require((i,cam) in records, f'Source depth sidecar missing: episode {i}/{cam} under {source}')
-            receipt_path = work/'transfer_receipts'/f'episode_{i:06d}_{cam}.json'
-            if receipt_path.exists():
-                receipt = read_json(receipt_path)
-                require(receipt['source']==str(src) and receipt['target']==str(dst), 'Transfer receipt path changed')
-            else:
-                files = frame_files(src)
-                require(len(files)==records[(i,cam)]['frame_count'], f'Incomplete depth output: {src}')
-                entries = []
-                for p in files:
-                    check_png(p,(720,1280,1))
-                    entries.append(dict(name=p.name,sha256=sha256(p)))
-                receipt = dict(source=str(src),target=str(dst),files=entries,complete=False)
-                write_json(receipt_path,receipt)
-            names = [e['name'] for e in receipt['files']]
-            require(names==[f'frame_{f:06d}.png' for f in range(records[(i,cam)]['frame_count'])],
-                    f'Transfer receipt frame count/names changed: {receipt_path}')
-            if dst.exists():
-                extras = [p for p in dst.iterdir() if p.name not in names and not p.name.endswith('.refine-part')]
-                require(not extras, f'Extra target files: {extras[:3]}')
-            for entry in receipt['files']:
-                p, target = src/entry['name'], dst/entry['name']
-                require((target.is_file() and sha256(target)==entry['sha256']) or
-                        (p.is_file() and sha256(p)==entry['sha256']),
-                        f'Neither source nor target matches transfer receipt: {p}')
-    log('Depth transfer preflight passed; all selected streams verified')
-    for i in tracked(selected,'迁移深度：episode'):
-        row = manifest[i]
-        original = int(row.get('source_episode_index', i))
-        if original // 1000 not in chunks:
-            continue
-        for cam in (1, 2):
-            rel = Path(f"images/chunk-{i//1000:03d}/observation.images.depth_{cam:02d}/episode_{i:06d}")
-            src = safe_path(source, f'images/chunk-{original//1000:03d}/observation.images.depth_{cam:02d}/episode_{original:06d}')
-            dst = safe_path(droid, rel)
-            require((i, cam) in records, f"Source depth sidecar missing: episode {i}/{cam} under {source}")
-            receipt_path = work / "transfer_receipts" / f"episode_{i:06d}_{cam}.json"
-            if receipt_path.exists():
-                receipt = read_json(receipt_path)
-                require(receipt["source"] == str(src) and receipt["target"] == str(dst), "Transfer receipt path changed")
-            else:
-                files = frame_files(src)
-                require(len(files) == records[(i, cam)]["frame_count"], f"Incomplete depth output: {src}")
-                entries = []
-                for p in files:
-                    check_png(p, (720, 1280, 1))
-                    entries.append(dict(name=p.name, sha256=sha256(p)))
-                receipt = dict(source=str(src), target=str(dst), files=entries, complete=False)
-                write_json(receipt_path, receipt)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            same_fs = source.stat().st_dev == dst.parent.stat().st_dev
-            if src.exists() and same_fs and not dst.exists():
-                # The usual chunks 2-13 case: an atomic directory rename avoids
-                # a second multi-terabyte copy. Intent was persisted above.
-                os.replace(src, dst)
-                sync_dir(src.parent)
-                sync_dir(dst.parent)
-            dst.mkdir(parents=True, exist_ok=True)
-            for entry in receipt["files"]:
-                p, target, digest = src / entry["name"], dst / entry["name"], entry["sha256"]
-                if target.exists() and sha256(target) == digest:
-                    continue
-                require(p.is_file() and sha256(p) == digest, f"Source/target differs from transfer receipt: {p}")
-                if same_fs:
-                    journal.backup(target)
-                    os.replace(p, target)
-                    sync_dir(p.parent)
-                    sync_dir(target.parent)
-                else:
-                    staged = target.with_name("." + target.name + ".refine-part")
-                    shutil.copy2(p, staged)
-                    require(sha256(staged) == digest, f"Cross-filesystem copy failed: {p}")
-                    journal.replace(target, staged)
-            require([p.name for p in frame_files(dst)] == [e["name"] for e in receipt["files"]], f"Extra/missing target frames: {dst}")
-            receipt["complete"] = True
-            write_json(receipt_path, receipt)
-            receipts.append(dict(source=str(src), target=str(dst), episode_index=i, camera=cam,
-                                 frame_count=len(receipt["files"]), same_filesystem=same_fs))
-        if i % 100 == 0:
-            log(f"Depth transfer: episode {i}")
-    require(receipts, f"No episodes selected in depth chunks {chunks}")
-    write_json(work / "depth_transfer.json", receipts)
+from .transfer import transfer_depth
 
 
 @lru_cache(maxsize=1)
@@ -413,14 +315,15 @@ def finalize(root, droid, subsets, work):
     """Called only after ALL subsets pass full decoding and metadata checks."""
     journal = Journal(root, work)
     moved = []
-    # Verify even same-filesystem renames against their immutable input hashes.
+    # Legacy/copied streams have hashes; atomic moves use sizes plus final validation.
+    from .transfer import matches
     for p in tracked(sorted((work / 'transfer_receipts').glob('*.json')),'清理前核对：相机序列'):
         receipt = read_json(p)
         for entry in receipt["files"]:
             target = Path(receipt["target"]) / entry["name"]
             if not target.exists():
                 target = work / "removed_tails" / target.relative_to(root)
-            require(target.is_file() and sha256(target) == entry["sha256"], f"Transferred depth changed unexpectedly: {target}")
+            require(matches(target, entry, content=True), f"Transferred depth changed unexpectedly: {target}")
     # Keep simulation and other real-world TARs. DROID TARs are obsolete after
     # trimming; remove only archives whose extraction receipt was verified.
     for receipt in tracked(read_json(work / 'unpacked.json'),'清理：TAR 记录'):
