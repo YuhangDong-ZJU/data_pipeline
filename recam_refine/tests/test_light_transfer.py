@@ -10,7 +10,7 @@ from recam_refine.transfer import transfer_depth
 
 
 class LightTransferTests(unittest.TestCase):
-    def test_unpack_streams_hash_and_reuses_completed_archive(self):
+    def test_unpack_without_hashes_and_reuses_completed_archive(self):
         import tarfile
         from recam_refine.archives import unpack_archive
         with tempfile.TemporaryDirectory() as tmp:
@@ -26,7 +26,7 @@ class LightTransferTests(unittest.TestCase):
             with patch('recam_refine.archives.sha256', side_effect=AssertionError('separate archive pre-read')), \
                     patch('recam_refine.archives.check_png', side_effect=AssertionError('early PNG decoding')):
                 result = unpack_archive(archive, root, Path(tmp)/'receipts')
-            self.assertEqual(result['sha256'], sha256(archive))
+            self.assertIsNone(result['sha256'])
             with patch('recam_refine.archives.tarfile.open', side_effect=AssertionError('repeat extraction')):
                 self.assertEqual(result, unpack_archive(archive, root, Path(tmp)/'receipts'))
 

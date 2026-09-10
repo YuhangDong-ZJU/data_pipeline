@@ -192,7 +192,7 @@ else
       step check STEP5_CHECK_SUCCESS.json --workers "$CHECK_WORKERS" --audit-frames "$AUDIT_FRAMES"
       step cleanup SUCCESS.json
       step repack REPACK_SUCCESS.json --episodes-per-shard "$EPISODES_PER_TAR" --workers "$REPACK_WORKERS"
-      echo 'FINAL: DROID depth PNG + verified TAR; simulation PNG + original TAR; logs/backups outside dataset.' ;;
+      echo 'FINAL: DROID depth PNG + TAR; simulation PNG + original TAR; logs/backups outside dataset.' ;;
   esac
 fi
 printf '[%s] SUCCESS elapsed=%ss\n' "$GROUP" "$((SECONDS-STARTED))"

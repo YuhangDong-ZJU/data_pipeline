@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from .progress import phase, tracked
+from .parallel import io_map
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
 from copy import deepcopy
-from functools import lru_cache
+from functools import lru_cache, partial
 import os
+import io
+import hashlib
 from pathlib import Path
 import shutil
 
@@ -14,7 +17,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from PIL import Image
 
-from .archives import check_png, frame_files, unpack_archive
+from .archives import checked_png_array, frame_files, unpack_archive
 from .common import (Journal, array_hash, preserved_hashes, check_transform, media_path, parquet_path, read_json,
                      read_jsonl, require, safe_path, set_values, sha256, values,
                      sync_dir, write_json, write_jsonl, acquire_directory_lock, validate_lock_mount)
@@ -69,7 +72,8 @@ def plan_episode(args):
     root = Path(root)
     i = episode["episode_index"]
     p = parquet_path(root, info, i)
-    table = pq.read_table(p)
+    parquet_bytes = p.read_bytes()
+    table = pq.read_table(io.BytesIO(parquet_bytes))
     length = int(episode["length"])
     original = int(row["length"])
     require(0 <= original - len(table) <= 2 and 0 <= original - length <= 2,
@@ -95,9 +99,7 @@ def plan_episode(args):
         # This is NOT called proof of SVO padding; the audit records the reason.
         zero_tail = 0
         for p in reversed(paths[-3:]):
-            check_png(p, info["features"][key]["shape"])
-            with Image.open(p) as im:
-                is_zero = not np.asarray(im).any()
+            is_zero = not checked_png_array(p, info["features"][key]["shape"]).any()
             if not is_zero:
                 break
             zero_tail += 1
@@ -128,7 +130,7 @@ def plan_episode(args):
     require(np.allclose(e[:, 1:], e[0, 1:], atol=1e-5), f"External cameras are not constant: {p}")
     require(np.isfinite(k).all() and np.all(k[:, :, [0,1], [0,1]] > 0), f"Invalid intrinsics: {p}")
     return dict(episode_index=i, length=n, previous_length=length, original_length=original,
-                original_parquet_sha256=sha256(parquet_path(root, info, i)), source=row, reasons=reasons,
+                original_parquet_sha256=hashlib.sha256(parquet_bytes).hexdigest(), source=row, reasons=reasons,
                 depths=depths, videos=streams, initial_intrinsics=k[0].tolist(), initial_extrinsics=e[0].tolist())
 
 
@@ -219,8 +221,9 @@ def apply_episode(args):
     path = parquet_path(droid, info, i)
     saved = journal.backup(path)
     # Always derive from the original, including after an interrupted run.
-    require(sha256(saved) == job["original_parquet_sha256"], f"Original Parquet identity changed: {path}")
-    table = pq.read_table(saved).slice(0, n)
+    raw = saved.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == job["original_parquet_sha256"], f"Original Parquet identity changed: {path}")
+    table = pq.read_table(io.BytesIO(raw)).slice(0, n)
     unchanged = preserved_hashes(table)
     wrist_hash = array_hash(values(table["observation.camera.extrinsics"])[:, 0])
     table = set_values(table, "index", np.arange(offset, offset + n))
@@ -310,6 +313,26 @@ def update_metadata(root, droid, info, jobs, stats, work, camera_directory=None,
 
 
 
+def _cleanup_source(rec, work):
+    src, dst = Path(rec["source"]), Path(rec["target"])
+    if not src.exists():
+        return
+    for p in sorted(src.glob("frame_*.png")):
+        target = dst / p.name
+        if target.exists():
+            from .archives import _same_bytes
+            require(_same_bytes(p, target), f"Source/final depth differs: {p}")
+        else:
+            backup = work / "source_removed_tails" / f"episode_{rec['episode_index']:06d}" / str(rec["camera"]) / p.name
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            if not backup.exists():
+                shutil.copy2(p, backup)
+            from .archives import _same_bytes
+            require(_same_bytes(p, backup), f"Tail backup differs: {p}")
+        p.unlink()
+    src.rmdir()
+
+
 def finalize(root, droid, subsets, work):
     """Called only after ALL subsets pass full decoding and metadata checks."""
     journal = Journal(root, work)
@@ -320,27 +343,19 @@ def finalize(root, droid, subsets, work):
     for receipt in tracked(read_json(work / 'unpacked.json'),'清理：TAR 记录'):
         p = Path(receipt["archive"])
         if p.is_relative_to(droid) and p.exists():
-            require(sha256(p) == receipt["sha256"], f"Archive changed during processing: {p}")
+            if receipt.get('archive_state') is not None:
+                from .archives import _file_state
+                require(_file_state(p) == receipt['archive_state'], f'Archive changed during processing: {p}')
+            else:
+                # Old receipts without a file-state snapshot need one identity
+                # check before deleting their archive; new receipts use no hash.
+                require(sha256(p) == receipt["sha256"], f"Archive changed during processing: {p}")
             p.unlink()
     # Discard redundant source copies only after verifying the retained prefix
     # against the final dataset and saving trimmed source frames for recovery.
     if (work / "depth_transfer.json").exists():
-        for rec in tracked(read_json(work / 'depth_transfer.json'),'清理：深度源序列'):
-            src, dst = Path(rec["source"]), Path(rec["target"])
-            if not src.exists():
-                continue
-            for p in sorted(src.glob("frame_*.png")):
-                target = dst / p.name
-                if target.exists():
-                    require(sha256(p) == sha256(target), f"Source/final depth differs: {p}")
-                else:
-                    backup = work / "source_removed_tails" / f"episode_{rec['episode_index']:06d}" / str(rec["camera"]) / p.name
-                    backup.parent.mkdir(parents=True, exist_ok=True)
-                    if not backup.exists():
-                        shutil.copy2(p, backup)
-                    require(sha256(p) == sha256(backup), f"Tail backup differs: {p}")
-                p.unlink()
-            src.rmdir()
+        io_map(partial(_cleanup_source, work=work),
+               read_json(work / 'depth_transfer.json'), 8, '清理源副本（相机序列）')
     # Retire obsolete wrist depth/normal and old plural normal annotations.
     for folder in ("images", "videos"):
         for chunk in (droid / folder).glob("chunk-*"):

@@ -47,7 +47,7 @@ class RepackTests(unittest.TestCase):
                 self.assertEqual(sha256(args.root / relative), digest)
             restored = Path(td) / 'restored'
             for item in record['archives']:
-                self.assertEqual(sha256(droid / item['path']), item['sha256'])
+                self.assertIsNone(item['sha256'])
                 unpack_archive(droid / item['path'], droid, Path(td) / 'receipts')
                 # Use a separate extraction root, preserving the original TAR layout.
                 archive_copy = restored / item['path']
@@ -59,21 +59,21 @@ class RepackTests(unittest.TestCase):
             self.assertEqual(expected, actual)
             tar = droid / record['archives'][0]['path']
             original_time = tar.stat().st_mtime_ns
-            with patch('recam_refine.repack.verify_tar', side_effect=AssertionError('repeated completed TAR read')):
+            with patch('recam_refine.repack.verify_existing_tar', side_effect=AssertionError('repeated completed TAR read')):
                 run_repack(args)
             self.assertEqual(tar.stat().st_mtime_ns, original_time)
-            self.assertTrue(all(r['status'] == 'verified' for r in read_json(args.work_dir / SUCCESS)['archives']))
+            self.assertTrue(all(r['status'] == 'reused' for r in read_json(args.work_dir / SUCCESS)['archives']))
             with tar.open('r+b') as f:
                 f.seek(512)
                 f.write(b'corrupt PNG bytes')
-            with self.assertRaisesRegex(RefineError, 'SHA-256 differs'):
+            with self.assertRaisesRegex(RefineError, 'TAR changed|TAR content differs'):
                 run_repack(args)
             self.assertFalse((args.work_dir / SUCCESS).exists())
             # An existing conflicting TAR without its receipt is not overwritten.
             receipt = hashlib.sha256(record['archives'][0]['path'].encode()).hexdigest() + '.json'
             (args.work_dir / 'repacked_depth' / receipt).unlink()
             corrupted_digest = sha256(tar)
-            with self.assertRaisesRegex(RefineError, 'SHA-256 differs'):
+            with self.assertRaisesRegex(RefineError, 'TAR changed|TAR content differs'):
                 run_repack(args)
             self.assertEqual(sha256(tar), corrupted_digest)
             for relative, digest in before.items():
@@ -115,8 +115,8 @@ class RepackTests(unittest.TestCase):
                        episodes=[dict(directory=relative + '/episode_000000', length=3)])
             result = pack_one(subset, work, job, 'large-png-test')
             self.assertGreater((subset / result['path']).stat().st_size, 3 * 1024 * 1024)
-            self.assertEqual(result['sha256'], sha256(subset / result['path']))
-            self.assertEqual(pack_one(subset, work, job, 'large-png-test')['status'], 'verified')
+            self.assertIsNone(result['sha256'])
+            self.assertEqual(pack_one(subset, work, job, 'large-png-test')['status'], 'reused')
 
     def test_failed_verification_does_not_publish_and_crash_can_resume(self):
         from recam_refine import repack
@@ -126,8 +126,8 @@ class RepackTests(unittest.TestCase):
             before = all_files(args.root)
             partial = droid / 'images/chunk-000/observation.images.depth_01/.episodes-000000-000000.tar.repack-part'
             partial.write_bytes(b'interrupted write from the same packing plan')
-            with patch.object(repack, 'verify_tar', side_effect=RefineError('injected verification failure')):
-                with self.assertRaisesRegex(RefineError, 'injected verification failure'):
+            with patch.object(repack.tarfile.TarFile, 'addfile', side_effect=RefineError('injected write failure')):
+                with self.assertRaisesRegex(RefineError, 'injected write failure'):
                     run_repack(args)
             self.assertFalse(list((droid / 'images').rglob('*.tar')))
             self.assertFalse(list((droid / 'images').rglob('*.repack-part')))

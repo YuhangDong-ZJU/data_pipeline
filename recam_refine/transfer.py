@@ -84,18 +84,25 @@ def _move(job, root, work, source_device, counter):
             sync_dir(target.parent)
         else:
             staged = target.with_name('.' + target.name + '.refine-part')
-            digest = hashlib.sha256()
+            before = p.stat()
+            digest = hashlib.sha256() if entry.get('sha256') else None
+            size = 0
             with p.open('rb') as incoming, staged.open('wb') as outgoing:
                 while block := incoming.read(1024 * 1024):
                     outgoing.write(block)
-                    digest.update(block)
+                    size += len(block)
+                    if digest is not None:
+                        digest.update(block)
                 outgoing.flush()
                 os.fsync(outgoing.fileno())
-            require(matches(staged, entry) and sha256(staged) == digest.hexdigest(), f'Copy verification failed: {p}')
-            require(not entry.get('sha256') or entry['sha256'] == digest.hexdigest(), f'Source changed since receipt: {p}')
-            entry['sha256'] = digest.hexdigest()
-            # Persist copy evidence before publishing the staged file.
-            write_json(receipt_path, receipt)
+            after = p.stat()
+            require(size == before.st_size == staged.stat().st_size and
+                    (before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+                    (after.st_size, after.st_mtime_ns, after.st_ctime_ns), f'Copy incomplete/source changed: {p}')
+            require(digest is None or entry['sha256'] == digest.hexdigest(), f'Source changed since receipt: {p}')
+            entry['size'] = size
+            # A partial stream can be recopied on recovery. Commit one receipt
+            # per completed stream, not one fsync/JSON rewrite per PNG.
             journal.replace(target, staged)
     require(_names(dst) == [e['name'] for e in receipt['files']], f'Extra/missing target frames: {dst}')
     if fast_path:

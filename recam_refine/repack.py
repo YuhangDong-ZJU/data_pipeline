@@ -1,4 +1,4 @@
-"""Publish verified external-depth TARs after cleanup, retaining training PNGs."""
+"""Publish external-depth TARs after cleanup, retaining training PNGs."""
 from __future__ import annotations
 
 from .progress import tracked
@@ -90,10 +90,6 @@ def packing_plan(subset, episodes_per_shard):
             first, last = batch[0]['episode_index'], batch[-1]['episode_index']
             relative = f'{parent}/episodes-{first:06d}-{last:06d}.tar'
             job = dict(path=relative, episodes=batch)
-            # PNG payloads are already compressed. Account for TAR headers,
-            # 512-byte padding and the final 10240-byte TAR record.
-            payload = sum(512 + ((snapshot(p)[0] + 511) // 512) * 512 for p in source_files(subset, job))
-            job['tar_bytes'] = ((payload + 1024 + 10239) // 10240) * 10240
             jobs.append(job)
     expected = {job['path'] for job in jobs}
     existing = {p.relative_to(subset).as_posix() for p in (subset / 'images').glob('chunk-*/*/*.tar')
@@ -102,85 +98,61 @@ def packing_plan(subset, episodes_per_shard):
     return jobs
 
 
-class HashReader:
-    def __init__(self, source):
-        self.source = source
-        self.hash = hashlib.sha256()
-        self.size = 0
-
-    def read(self, size=-1):
-        data = self.source.read(size)
-        self.hash.update(data)
-        self.size += len(data)
-        return data
+def expected_members(job):
+    return {f"{e['directory']}/frame_{f:06d}.png" for e in job['episodes'] for f in range(e['length'])}
 
 
-def verify_tar(path, entries, relative):
-    """Read every member and every archive byte; never extract to the dataset."""
-    before = snapshot(path)
+def verify_existing_tar(path, subset, job):
+    """Exceptional recovery only: compare an unreceipted archive without hashing."""
     seen = set()
-    with path.open('rb') as source:
-        reader = HashReader(source)
-        with tarfile.open(fileobj=reader, mode='r|', bufsize=BLOCK) as archive:
-            for member in archive:
-                require(member.isfile(), f'Unexpected non-file TAR member: {member.name}')
-                name = member_path(member.name, relative)
-                require(member.name == name and name in entries and name not in seen,
-                        f'Unexpected or duplicate TAR member: {member.name}')
-                require(member.size == entries[name]['size'], f'TAR member size differs: {name}')
-                digest, size = hashlib.sha256(), 0
-                with archive.extractfile(member) as content:
-                    for block in iter(lambda: content.read(BLOCK), b''):
-                        digest.update(block)
-                        size += len(block)
-                require(size == member.size and digest.hexdigest() == entries[name]['sha256'],
-                        f'TAR member SHA-256 differs: {name}')
-                seen.add(name)
-        # The streaming TAR reader can stop at its end marker before EOF.
-        # Drain the underlying reader to hash the entire archive, including padding.
-        for _ in iter(lambda: reader.read(BLOCK), b''):
-            pass
-    require(seen == set(entries), f'Missing TAR members: {path}')
-    require(snapshot(path) == before and reader.size == before[0], f'TAR changed while verifying: {path}')
-    return reader.hash.hexdigest()
+    expected = expected_members(job)
+    with tarfile.open(path, 'r:') as tar:
+        for member in tar:
+            name = member_path(member.name, job['path'])
+            require(member.isfile() and member.name == name and name in expected and name not in seen,
+                    f'Unexpected TAR member: {member.name}')
+            source = safe_path(subset, name)
+            require(snapshot(source)[0] == member.size, f'TAR member size differs: {name}')
+            with tar.extractfile(member) as incoming, source.open('rb') as original:
+                while True:
+                    a, b = incoming.read(BLOCK), original.read(BLOCK)
+                    require(a == b, f'TAR content differs: {name}')
+                    if not a:
+                        break
+            seen.add(name)
+    require(seen == expected, f'Missing TAR members: {path}')
 
 
 def pack_one(subset, work, job, plan_id):
     target = safe_path(subset, job['path'])
     receipt_path = receipt_file(work, job['path'])
+    expected = expected_members(job)
     if receipt_path.exists():
         receipt = read_json(receipt_path)
         require(receipt['plan_id'] == plan_id and receipt['path'] == job['path'] and receipt['complete'] is True,
                 f'TAR receipt belongs to another plan: {target}')
-        require(target.is_file(), f'Completed TAR is missing: {target}')
-        expected_names = {p.relative_to(subset).as_posix() for p in source_files(subset, job)}
-        require(expected_names == set(receipt['members']), f'TAR receipt coverage differs: {target}')
+        require(expected == set(receipt['members']), f'TAR receipt coverage differs: {target}')
         current = snapshot(target)
-        if receipt.get('verified_state') == list(current):
-            digest = receipt['sha256']
-            print(f'SKIPPED 打包：已完成验证且归档未变化 {target}', flush=True)
-        else:
-            digest = verify_tar(target, receipt['members'], job['path'])
-            require(digest == receipt['sha256'], f'TAR changed after packing: {target}')
-            receipt['verified_state'] = list(current)
+        state = receipt.get('file_state', receipt.get('verified_state'))
+        if state is None:
+            verify_existing_tar(target, subset, job)
+            receipt['file_state'] = list(current)
             write_json(receipt_path, receipt)
-        return dict(path=job['path'], sha256=digest, files=len(expected_names), status='verified', state=snapshot(target))
-
+        else:
+            require(state == list(current), f'TAR changed after packing: {target}')
+        print(f'SKIPPED 打包：已完成且归档未变化 {target}', flush=True)
+        return dict(path=job['path'], sha256=receipt.get('sha256'), files=len(expected),
+                    status='reused', state=current, content_hashes=False)
     entries = {}
     part = target.with_name('.' + target.name + '.repack-part')
     require(not part.is_symlink(), f'Linked temporary TAR: {part}')
     try:
         if target.exists():
-            # Recover a crash after atomic publication but before the receipt.
-            # Existing archives are accepted only after comparing every PNG byte.
-            for path in source_files(subset, job):
-                before = snapshot(path)
-                digest = sha256(path)
-                require(snapshot(path) == before, f'PNG changed while hashing: {path}')
-                entries[path.relative_to(subset).as_posix()] = dict(size=before[0], sha256=digest)
-            digest = verify_tar(target, entries, job['path'])
+            verify_existing_tar(target, subset, job)
+            entries = {name:dict(size=snapshot(safe_path(subset, name))[0]) for name in expected}
             status = 'recovered'
         else:
+            payload = 0
             with part.open('wb') as destination:
                 with tarfile.open(fileobj=destination, mode='w', format=tarfile.USTAR_FORMAT,
                                   copybufsize=BLOCK) as archive:
@@ -190,21 +162,23 @@ def pack_one(subset, work, job, plan_id):
                         member = tarfile.TarInfo(name)
                         member.size, member.mode, member.mtime = before[0], 0o644, 0
                         with path.open('rb') as source:
-                            reader = HashReader(source)
-                            archive.addfile(member, reader)
-                        require(reader.size == before[0] and snapshot(path) == before,
-                                f'PNG changed while packing: {path}')
-                        entries[name] = dict(size=reader.size, sha256=reader.hash.hexdigest())
+                            archive.addfile(member, source)
+                        require(snapshot(path) == before, f'PNG changed while packing: {path}')
+                        entries[name] = dict(size=before[0])
+                        payload += 512 + ((before[0] + 511) // 512) * 512
                 destination.flush()
                 os.fsync(destination.fileno())
-            digest = verify_tar(part, entries, job['path'])
+            expected_size = ((payload + 1024 + 10239) // 10240) * 10240
+            require(set(entries) == expected and snapshot(part)[0] == expected_size, f'Incomplete TAR write: {part}')
             require(not target.exists(), f'TAR appeared while packing; refusing to overwrite: {target}')
             os.replace(part, target)
             sync_dir(target.parent)
             status = 'created'
         write_json(receipt_path, dict(plan_id=plan_id, path=job['path'], complete=True,
-                                     sha256=digest, members=entries, verified_state=list(snapshot(target))))
-        return dict(path=job['path'], sha256=digest, files=len(entries), status=status, state=snapshot(target))
+                                     sha256=None, members=entries, file_state=list(snapshot(target)),
+                                     content_hashes=False))
+        return dict(path=job['path'], sha256=None, files=len(entries), status=status,
+                    state=snapshot(target), content_hashes=False)
     finally:
         part.unlink(missing_ok=True)
 
@@ -217,7 +191,13 @@ def run_repack(args):
         checked = checked_dataset(root, work)
         subset = root / 'real_world/droid'
         jobs = packing_plan(subset, args.episodes_per_shard)
-        settings = dict(schema=1, root=str(root), checked=checked, episodes_per_shard=args.episodes_per_shard, jobs=jobs)
+        settings = dict(schema=2, root=str(root), checked=checked, episodes_per_shard=args.episodes_per_shard, jobs=jobs)
+        previous = work/'step_settings/repack.json'
+        if previous.exists():
+            saved = read_json(previous)
+            normalized = {**saved, 'schema':2, 'jobs':[{k:v for k,v in j.items() if k != 'tar_bytes'} for j in saved['jobs']]}
+            require(normalized == settings, 'repack settings changed; resume with the original arguments')
+            settings = saved
         freeze_settings(work, 'repack', settings)
         plan_id = hashlib.sha256(json.dumps(settings, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         # Reclaim only this frozen plan's reserved partial files after a crash.
@@ -230,20 +210,11 @@ def run_repack(args):
                 snapshot(part)
                 part.unlink()
                 sync_dir(part.parent)
-        required = sum(job['tar_bytes'] for job in jobs if not safe_path(subset, job['path']).exists())
-        manifests = sum(4096 + 320 * sum(e['length'] for e in job['episodes'])
-                        for job in jobs if not receipt_file(work, job['path']).exists())
-        margin = 64 * 1024 * 1024
-        if subset.stat().st_dev == work.stat().st_dev:
-            require(shutil.disk_usage(subset).free >= required + manifests + margin,
-                    f'Insufficient free disk space for TARs and manifests: need {(required + manifests + margin) / 1024**3:.2f} GiB')
-        else:
-            require(shutil.disk_usage(subset).free >= required + margin,
-                    f'Insufficient free disk space for new TARs: need {(required + margin) / 1024**3:.2f} GiB')
-            require(shutil.disk_usage(work).free >= manifests + margin,
-                    f'Insufficient free disk space in work directory for manifests: need {(manifests + margin) / 1024**3:.2f} GiB')
-        print(f'Repack: {len(jobs)} TARs; {sum(e["length"] for j in jobs for e in j["episodes"])} PNGs; '
-              f'new TAR space {required / 1024**3:.2f} GiB; source PNGs retained', flush=True)
+        # Avoid scanning every PNG up front just to estimate disk usage.
+        # Failed writes leave source PNGs intact and remove the partial TAR.
+        require(shutil.disk_usage(subset).free >= 64 * 1024 * 1024,
+                'Insufficient free disk space to start packing')
+        print(f'Repack: {len(jobs)} TARs; source PNGs retained; no content hashes', flush=True)
         results = []
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures = [pool.submit(pack_one, subset, work, job, plan_id) for job in jobs]
@@ -256,11 +227,12 @@ def run_repack(args):
                 for future in futures:
                     future.cancel()
                 raise
-        require(checked_dataset(root, work) == checked, 'Check/cleanup records changed while packing')
+        require({stage:sha256(work/MARKERS[stage]) for stage in ('check','cleanup')} == checked,
+                'Check/cleanup records changed while packing')
         for result in results:
             require(snapshot(safe_path(subset, result['path'])) == result.pop('state'),
                     f'TAR changed before final publication: {result["path"]}')
         write_json(work / SUCCESS, dict(complete=True, root=str(root), plan_id=plan_id, checked=checked,
                                        source_pngs_retained=True, archives=sorted(results, key=lambda r: r['path'])))
         (work / 'REPACK_FAILED.json').unlink(missing_ok=True)
-        print(f'REPACK COMPLETE: {work / SUCCESS}; all TAR member hashes verified; source PNGs retained.', flush=True)
+        print(f'REPACK COMPLETE: {work / SUCCESS}; TAR writes completed; source PNGs retained; content hashes not computed.', flush=True)
