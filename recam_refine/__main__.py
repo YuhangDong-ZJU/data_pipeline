@@ -91,6 +91,7 @@ def main():
     p.add_argument('--depth-output',type=Path,required=True)
     p.add_argument('--depth-chunks',default='2-13')
     p.add_argument('--episode-manifest',type=Path)
+    p.add_argument('--workers',type=int,default=8,help='CPU/I/O processes for parallel depth transfer')
     p = sub.add_parser('run-step',help='Run exactly one manual stage, then stop')
     p.add_argument('step',choices=('unpack','align','overlap','refine','apply','check','cleanup','repack','status',
                                   'shard-plan','shard-refine','shard-merge','shard-status'))
