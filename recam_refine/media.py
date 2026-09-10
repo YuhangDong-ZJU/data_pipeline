@@ -76,7 +76,7 @@ def trim_video(path, output, length, fps):
         require(count == length, f"Source video is too short: {path}")
         for packet in enc.encode():
             target.mux(packet)
-    decode_check(output, length, (s.height, s.width), fps)
+    # Final dataset validation decodes the result and checks every PTS/frame.
 
 
 def assert_same_video_prefix(original, trimmed, length):

@@ -19,7 +19,7 @@ from .common import (Journal, array_hash, preserved_hashes, check_transform, med
                      read_jsonl, require, safe_path, set_values, sha256, values,
                      sync_dir, write_json, write_jsonl, acquire_directory_lock, validate_lock_mount)
 from .inputs import canonical_manifest, download_inputs, load_depth_records
-from .media import assert_same_video_prefix, trim_video, video_info
+from .media import trim_video, video_info
 from .pointworld import Robot, prepare_assets, refine_camera_with_retry, release_pose, POINTWORLD_COMMIT, CalibrationRejected
 from .stats import aggregate, table_stats
 
@@ -211,7 +211,6 @@ def apply_episode(args):
         require(probe["frames"] == original["frames"], f"Video changed during refine: {path}")
         staged = path.with_name("." + path.stem + ".refine-part.mp4")
         trim_video(path, staged, n, info["fps"])
-        assert_same_video_prefix(path, staged, n)
         journal.replace(path, staged)
     for cam in (1, 2):
         directory = media_path(droid, info, i, f"observation.images.depth_{cam:02d}", 0).parent

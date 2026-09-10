@@ -59,7 +59,8 @@ class RepackTests(unittest.TestCase):
             self.assertEqual(expected, actual)
             tar = droid / record['archives'][0]['path']
             original_time = tar.stat().st_mtime_ns
-            run_repack(args)
+            with patch('recam_refine.repack.verify_tar', side_effect=AssertionError('repeated completed TAR read')):
+                run_repack(args)
             self.assertEqual(tar.stat().st_mtime_ns, original_time)
             self.assertTrue(all(r['status'] == 'verified' for r in read_json(args.work_dir / SUCCESS)['archives']))
             with tar.open('r+b') as f:

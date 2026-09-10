@@ -155,8 +155,15 @@ def pack_one(subset, work, job, plan_id):
         require(target.is_file(), f'Completed TAR is missing: {target}')
         expected_names = {p.relative_to(subset).as_posix() for p in source_files(subset, job)}
         require(expected_names == set(receipt['members']), f'TAR receipt coverage differs: {target}')
-        digest = verify_tar(target, receipt['members'], job['path'])
-        require(digest == receipt['sha256'], f'TAR changed after packing: {target}')
+        current = snapshot(target)
+        if receipt.get('verified_state') == list(current):
+            digest = receipt['sha256']
+            print(f'SKIPPED 打包：已完成验证且归档未变化 {target}', flush=True)
+        else:
+            digest = verify_tar(target, receipt['members'], job['path'])
+            require(digest == receipt['sha256'], f'TAR changed after packing: {target}')
+            receipt['verified_state'] = list(current)
+            write_json(receipt_path, receipt)
         return dict(path=job['path'], sha256=digest, files=len(expected_names), status='verified', state=snapshot(target))
 
     entries = {}
@@ -196,7 +203,7 @@ def pack_one(subset, work, job, plan_id):
             sync_dir(target.parent)
             status = 'created'
         write_json(receipt_path, dict(plan_id=plan_id, path=job['path'], complete=True,
-                                     sha256=digest, members=entries))
+                                     sha256=digest, members=entries, verified_state=list(snapshot(target))))
         return dict(path=job['path'], sha256=digest, files=len(entries), status=status, state=snapshot(target))
     finally:
         part.unlink(missing_ok=True)

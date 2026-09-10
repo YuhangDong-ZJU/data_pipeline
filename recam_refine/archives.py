@@ -56,71 +56,106 @@ def checked_png_array(path, shape=None, depth=True):
     return _check_png_bytes(data, path, shape, depth, pixels=True)
 
 
+class _HashReader:
+    def __init__(self, source):
+        self.source = source
+        self.hash = hashlib.sha256()
+
+    def read(self, size=-1):
+        data = self.source.read(size)
+        self.hash.update(data)
+        return data
+
+
+def _file_state(path):
+    try:
+        s = path.lstat()
+        return [s.st_dev, s.st_ino, s.st_mode, s.st_size, s.st_mtime_ns, s.st_ctime_ns]
+    except FileNotFoundError:
+        return None
+
+
 def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
     archive, subset = Path(archive), Path(subset)
     rel_archive = archive.relative_to(subset).as_posix()
     receipt = Path(receipt_root) / (hashlib.sha256(str(archive).encode()).hexdigest() + ".json")
+    archive_state = _file_state(archive)
     # Receipts are consumed only before any trimming starts.
-    archive_hash = sha256(archive)
     if receipt.exists():
         saved = read_json(receipt)
-        require(saved["sha256"] == archive_hash, f"Archive changed since extraction: {archive}")
+        if saved.get('archive_state') == archive_state and 'target_states' in saved:
+            for rel, state in saved['target_states'].items():
+                migrated = authoritative_streams and PurePosixPath(rel).parent.as_posix() in authoritative_streams
+                label = 'Migrated depth changed' if migrated else 'Extracted file changed'
+                require(_file_state(safe_path(subset, rel)) == state, f'{label}: {rel}')
+            print(f'SKIPPED 解压：已完成且文件属性未变化 {archive}', flush=True)
+            return {k:saved[k] for k in ('archive', 'sha256', 'files', 'superseded_by_metric_depth')}
+        require(saved["sha256"] == sha256(archive), f"Archive changed since extraction: {archive}")
     members = set()
     bytes_written = 0
     superseded = 0
+    target_states = {}
     authoritative_streams = authoritative_streams or {}
-    with tarfile.open(archive, "r:*") as tar:
-        for member in tar:
-            require(not (member.issym() or member.islnk() or member.isdev() or member.isfifo()),
-                    f"Links/special files are forbidden in depth TAR: {member.name}")
-            if member.isdir():
-                p = PurePosixPath(member.name)
-                require(not p.is_absolute() and ".." not in p.parts and "\\" not in member.name,
-                        f"Unsafe TAR directory: {member.name}")
-                continue
-            require(member.isfile(), f"Unsupported TAR member: {member.name}")
-            rel = member_path(member.name, rel_archive)
-            require(rel not in members, f"Duplicate TAR member: {rel}")
-            members.add(rel)
-            target = safe_path(subset, rel)
-            authority = authoritative_streams.get(PurePosixPath(rel).parent.as_posix())
-            if authority is not None:
-                if target.name in authority:
-                    expected = authority[target.name]
-                    require(target.is_file() and not target.is_symlink() and
-                            (expected['size'] is None or target.stat().st_size == expected['size'] if isinstance(expected, dict)
-                             else sha256(target) == expected),
-                            f'Migrated depth changed before TAR extraction: {target}')
-                else:
-                    require(not target.exists(), f'Unexpected frame outside migrated depth stream: {target}')
-                # Old depth is superseded; do not extract/decode it only to discard it.
-                superseded += 1
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            part = target.with_name("." + target.name + ".unpack-part")
-            h = hashlib.sha256()
-            size = 0
-            try:
-                with tar.extractfile(member) as src, part.open("wb") as dst:
-                    for block in iter(lambda: src.read(1024 * 1024), b""):
-                        dst.write(block)
-                        h.update(block)
-                        size += len(block)
-                    dst.flush()
-                    os.fsync(dst.fileno())
-                require(size == member.size, f"Truncated TAR member: {rel}")
-                check_png(part)
-                if target.exists():
-                    require(sha256(target) == h.hexdigest(), f"Existing PNG conflicts with TAR: {target}")
-                else:
-                    os.replace(part, target)
-                    sync_dir(target.parent)
-                    bytes_written += size
-            finally:
-                part.unlink(missing_ok=True)
+    with archive.open("rb") as raw:
+        reader = _HashReader(raw)
+        with tarfile.open(fileobj=reader, mode="r|*") as tar:
+            for member in tar:
+                require(not (member.issym() or member.islnk() or member.isdev() or member.isfifo()),
+                        f"Links/special files are forbidden in depth TAR: {member.name}")
+                if member.isdir():
+                    p = PurePosixPath(member.name)
+                    require(not p.is_absolute() and ".." not in p.parts and "\\" not in member.name,
+                            f"Unsafe TAR directory: {member.name}")
+                    continue
+                require(member.isfile(), f"Unsupported TAR member: {member.name}")
+                rel = member_path(member.name, rel_archive)
+                require(rel not in members, f"Duplicate TAR member: {rel}")
+                members.add(rel)
+                target = safe_path(subset, rel)
+                authority = authoritative_streams.get(PurePosixPath(rel).parent.as_posix())
+                if authority is not None:
+                    if target.name in authority:
+                        expected = authority[target.name]
+                        require(target.is_file() and not target.is_symlink() and
+                                (expected['size'] is None or target.stat().st_size == expected['size'] if isinstance(expected, dict)
+                                 else sha256(target) == expected),
+                                f'Migrated depth changed before TAR extraction: {target}')
+                    else:
+                        require(not target.exists(), f'Unexpected frame outside migrated depth stream: {target}')
+                    # Old depth is superseded; do not extract/decode it only to discard it.
+                    superseded += 1
+                    target_states[rel] = _file_state(target)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                part = target.with_name("." + target.name + ".unpack-part")
+                h = hashlib.sha256()
+                size = 0
+                try:
+                    with tar.extractfile(member) as src, part.open("wb") as dst:
+                        for block in iter(lambda: src.read(1024 * 1024), b""):
+                            dst.write(block)
+                            h.update(block)
+                            size += len(block)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    require(size == member.size, f"Truncated TAR member: {rel}")
+                    if target.exists():
+                        require(sha256(target) == h.hexdigest(), f"Existing PNG conflicts with TAR: {target}")
+                    else:
+                        os.replace(part, target)
+                        sync_dir(target.parent)
+                        bytes_written += size
+                finally:
+                    part.unlink(missing_ok=True)
+                target_states[rel] = _file_state(target)
+        while reader.read(1024 * 1024):
+            pass
+        archive_hash = reader.hash.hexdigest()
     require(members, f"Empty depth TAR: {archive}")
+    require(_file_state(archive) == archive_state, f'Archive changed during extraction: {archive}')
     write_json(receipt, dict(archive=str(archive), sha256=archive_hash, files=len(members),
-                            bytes_written=bytes_written,superseded_by_metric_depth=superseded))
+                            bytes_written=bytes_written,superseded_by_metric_depth=superseded,
+                            archive_state=archive_state, target_states=target_states))
     return dict(archive=str(archive), sha256=archive_hash, files=len(members),superseded_by_metric_depth=superseded)
 
 

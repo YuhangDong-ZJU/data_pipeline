@@ -10,6 +10,26 @@ from recam_refine.transfer import transfer_depth
 
 
 class LightTransferTests(unittest.TestCase):
+    def test_unpack_streams_hash_and_reuses_completed_archive(self):
+        import tarfile
+        from recam_refine.archives import unpack_archive
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)/'dataset'
+            rel = 'images/chunk-000/observation.images.depth_01/episode_000000/frame_000000.png'
+            png = root/rel
+            png.parent.mkdir(parents=True)
+            png.write_bytes(b'decode is deferred to the final check')
+            archive = png.parent.parent/'episodes-000000-000000.tar'
+            with tarfile.open(archive, 'w') as tar:
+                tar.add(png, arcname=rel)
+            png.unlink()
+            with patch('recam_refine.archives.sha256', side_effect=AssertionError('separate archive pre-read')), \
+                    patch('recam_refine.archives.check_png', side_effect=AssertionError('early PNG decoding')):
+                result = unpack_archive(archive, root, Path(tmp)/'receipts')
+            self.assertEqual(result['sha256'], sha256(archive))
+            with patch('recam_refine.archives.tarfile.open', side_effect=AssertionError('repeat extraction')):
+                self.assertEqual(result, unpack_archive(archive, root, Path(tmp)/'receipts'))
+
     def test_sidecar_cache_reuses_validated_data_and_rejects_changed_timestamps(self):
         from recam_refine.inputs import load_depth_records
         with tempfile.TemporaryDirectory() as tmp:
