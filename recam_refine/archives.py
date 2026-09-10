@@ -88,7 +88,7 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
                 if target.name in authority:
                     expected = authority[target.name]
                     require(target.is_file() and not target.is_symlink() and
-                            (target.stat().st_size == expected['size'] if isinstance(expected, dict)
+                            (expected['size'] is None or target.stat().st_size == expected['size'] if isinstance(expected, dict)
                              else sha256(target) == expected),
                             f'Migrated depth changed before TAR extraction: {target}')
                 else:

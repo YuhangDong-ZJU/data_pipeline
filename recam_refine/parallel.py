@@ -11,9 +11,9 @@ class Counter:
         self.value = 0
         self.lock = threading.Lock()
 
-    def tick(self):
+    def tick(self, amount=1):
         with self.lock:
-            self.value += 1
+            self.value += amount
 
 
 def io_map(function, items, workers, name, detail=None):

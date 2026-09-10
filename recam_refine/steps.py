@@ -31,7 +31,7 @@ def transferred_streams(root, work):
         directory = Path(record['target'])
         require(directory.is_relative_to(root), f'Transfer target outside DROID: {directory}')
         streams[directory.relative_to(root).as_posix()] = {
-            e['name']: e['sha256'] if e.get('sha256') else {'size': e['size']}
+            e['name']: e['sha256'] if e.get('sha256') else {'size': e.get('size')}
             for e in record['files']}
     return streams
 

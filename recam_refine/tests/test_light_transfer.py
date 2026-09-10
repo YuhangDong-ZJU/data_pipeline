@@ -72,7 +72,8 @@ class LightTransferTests(unittest.TestCase):
                 transfer_depth(root, droid, source, {0:row}, {0}, work)
             else:
                 with patch('recam_refine.transfer.sha256', side_effect=AssertionError('unnecessary full read')), \
-                        patch('recam_refine.inputs.load_depth_records', side_effect=AssertionError('bulk JSON read in transfer')):
+                        patch('recam_refine.inputs.load_depth_records', side_effect=AssertionError('bulk JSON read in transfer')), \
+                        patch.object(Path, 'read_bytes', side_effect=AssertionError('PNG content read during atomic move')):
                     transfer_depth(root, droid, source, {0:row}, {0}, work)
             # Completed receipts do not trigger content rescans, even for legacy hashes.
             with patch('recam_refine.transfer.sha256', side_effect=AssertionError('repeat read')):
