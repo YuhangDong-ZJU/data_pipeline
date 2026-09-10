@@ -5,7 +5,6 @@ from pathlib import Path
 
 from .archives import check_png, frame_files
 from .common import Journal, read_json, require, safe_path, sha256, sync_dir, write_json
-from .inputs import load_depth_records
 from .progress import tracked
 
 
@@ -21,7 +20,6 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
     source = Path(source).resolve()
     require(source.is_dir() and not source.is_relative_to(root) and not root.is_relative_to(source),
             'Depth output and dataset must be separate')
-    records = load_depth_records([source], manifest)
     journal = Journal(root, work)
     jobs = []
     selected = [i for i in sorted(manifest) if int(manifest[i].get('source_episode_index', i)) // 1000 in chunks]
@@ -30,17 +28,16 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
         for cam in (1, 2):
             src = safe_path(source, f'images/chunk-{original//1000:03d}/observation.images.depth_{cam:02d}/episode_{original:06d}')
             dst = safe_path(droid, f'images/chunk-{i//1000:03d}/observation.images.depth_{cam:02d}/episode_{i:06d}')
-            require((i, cam) in records, f'Source depth sidecar missing: {i}/{cam}')
-            names = [f'frame_{f:06d}.png' for f in range(records[i, cam]['frame_count'])]
             receipt_path = work/'transfer_receipts'/f'episode_{i:06d}_{cam}.json'
             existing_receipt = receipt_path.exists()
             if existing_receipt:
                 receipt = read_json(receipt_path)
                 require(receipt['source'] == str(src) and receipt['target'] == str(dst), 'Transfer receipt path changed')
+                names = [f'frame_{f:06d}.png' for f in range(len(receipt['files']))]
                 require([e['name'] for e in receipt['files']] == names, f'Transfer receipt frame count/names changed: {receipt_path}')
             else:
                 files = frame_files(src)
-                require([p.name for p in files] == names, f'Incomplete depth output: {src}')
+                names = [p.name for p in files]
                 # Full PNG decoding belongs to final validation. Sample both ends here.
                 for p in dict.fromkeys((files[0], files[-1])):
                     check_png(p, (720, 1280, 1))
@@ -48,6 +45,8 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
                 require(all(e['size'] > 0 for e in entries), f'Empty depth file: {src}')
                 receipt = dict(version=2, source=str(src), target=str(dst), files=entries, complete=False)
                 write_json(receipt_path, receipt)
+            require(0 <= int(manifest[i]['length']) - len(names) <= 2,
+                    f'Depth frame count differs from source manifest: {src}')
             if dst.exists():
                 allowed = set(names)
                 require(all(p.name in allowed or p.name.endswith('.refine-part') for p in dst.iterdir()),

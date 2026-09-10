@@ -183,7 +183,11 @@ def align_only(root,work,args):
     step1 = read_json(work/'step1_configuration.json')
     require(transfer_configuration(root,step1['depth_output'],set(step1['chunks']),manifest)==step1,'Step 1 episode mapping changed')
     metadata_roots = [droid,Path(step1['depth_output']),*args.depth_metadata]
-    records = load_depth_records(metadata_roots,manifest)
+    records = load_depth_records(metadata_roots,manifest,cache_dir=work/'input_cache')
+    for row in step1['identities']:
+        for cam in (1, 2):
+            require((row['episode_index'], cam) in records,
+                    f'Migrated depth sidecar missing before alignment: {row["episode_index"]}/{cam}')
     settings = dict(manifest_sha256=sha256(manifest_path) if Path(manifest_path).is_file() else
                     {p.name:sha256(p) for p in sorted(Path(manifest_path).glob('chunk-*.jsonl'))},
                     sidecars={str(k):v['sha256'] for k,v in records.items()})

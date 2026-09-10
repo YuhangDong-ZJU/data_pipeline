@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
@@ -117,8 +118,35 @@ def canonical_manifest(path, episodes):
     return selected
 
 
-def load_depth_records(roots, manifest):
+def load_depth_records(roots, manifest, cache_dir=None):
+    from .input_cache import InputCache
+    cache = InputCache(cache_dir, manifest)
+    try:
+        return _load_depth_records(roots, manifest, cache)
+    finally:
+        cache.close()
+        if cache_dir is not None:
+            print(f'Depth JSON: 已校验且未变化，跳过读取 {cache.hits} 个；需要读取 {cache.misses} 个', flush=True)
+
+
+def _sidecar_inputs(paths, cache):
+    # Bound both I/O concurrency and retained raw JSON memory on shared storage.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for start in range(0, len(paths), 32):
+            batch = [(p, cache.get(p)) for p in paths[start:start + 32]]
+            pending = {p: pool.submit(p.read_bytes) for p, saved in batch if saved is None}
+            for p, saved in batch:
+                yield p, pending[p].result() if saved is None else None, saved
+
+
+def _load_depth_records(roots, manifest, cache):
     records = {}
+    def merge(key, value, path):
+        if key in records:
+            a = {k:v for k,v in records[key].items() if k not in ('path', 'sha256')}
+            b = {k:v for k,v in value.items() if k not in ('path', 'sha256')}
+            require(a == b, f'Conflicting depth sidecars: {path}')
+        records[key] = value
     source_to_current = {int(r.get('source_episode_index', i)): i for i, r in manifest.items()}
     roots = list(dict.fromkeys(Path(p).resolve() for p in roots))
     for root in roots:
@@ -129,8 +157,12 @@ def load_depth_records(roots, manifest):
         phase('枚举深度 JSON（目录任务）', 0, 1, str(root))
         paths = sorted(root.glob("chunk-*/observation.images.depth_*/episode_*.json"))
         phase('枚举深度 JSON（目录任务）', 1, 1, f'{root}；找到 {len(paths)} 个文件')
-        for p in tracked(paths, '校验深度 JSON：身份、时间戳及 SHA256（文件）'):
-            raw = p.read_bytes()
+        for p, raw, saved in tracked(_sidecar_inputs(paths, cache),
+                                    '深度 JSON：复用缓存或并发读取（文件）', len(paths)):
+            if saved is not None:
+                key, value = saved
+                merge(tuple(key), value, p)
+                continue
             d = json.loads(raw)
             src = d["source"]
             original = int(src["episode_index"])
@@ -154,9 +186,6 @@ def load_depth_records(roots, manifest):
             key = (i, int(role[-1]))
             value = dict(path=str(p), sha256=hashlib.sha256(raw).hexdigest(), frame_count=n, decoded=decoded, missing=missing,
                          intrinsic=d["calibration"]["intrinsic"], camera_serial=str(src["camera_serial"]))
-            if key in records:
-                a = {k:v for k,v in records[key].items() if k not in ("path", "sha256")}
-                b = {k:v for k,v in value.items() if k not in ("path", "sha256")}
-                require(a == b, f"Conflicting depth sidecars: {p}")
-            records[key] = value
+            merge(key, value, p)
+            cache.put(p, key, value)
     return records

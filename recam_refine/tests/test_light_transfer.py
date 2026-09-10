@@ -10,6 +10,23 @@ from recam_refine.transfer import transfer_depth
 
 
 class LightTransferTests(unittest.TestCase):
+    def test_sidecar_cache_reuses_validated_data_and_rejects_changed_timestamps(self):
+        from recam_refine.inputs import load_depth_records
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            row = dict(episode_index=0, length=3, source_episode_id='test+0',
+                       camera_serials={'external_1':'a', 'external_2':'b'})
+            source_depth(base/'source', [row])
+            first = load_depth_records([base/'source'], {0:row}, base/'cache')
+            with patch.object(Path, 'read_bytes', side_effect=AssertionError('repeated sidecar read')):
+                self.assertEqual(first, load_depth_records([base/'source'], {0:row}, base/'cache'))
+            path = Path(first[0,1]['path'])
+            record = read_json(path)
+            record['source']['timestamps_ms'] = [1,1,2]
+            write_json(path, record)
+            with self.assertRaisesRegex(Exception, 'Unordered timestamps'):
+                load_depth_records([base/'source'], {0:row}, base/'cache')
+
     def test_final_png_decodes_once_without_verify_and_rejects_broken_data(self):
         import numpy as np
         from PIL import Image
@@ -54,7 +71,8 @@ class LightTransferTests(unittest.TestCase):
                 self.assertNotEqual(source.stat().st_dev, droid.stat().st_dev)
                 transfer_depth(root, droid, source, {0:row}, {0}, work)
             else:
-                with patch('recam_refine.transfer.sha256', side_effect=AssertionError('unnecessary full read')):
+                with patch('recam_refine.transfer.sha256', side_effect=AssertionError('unnecessary full read')), \
+                        patch('recam_refine.inputs.load_depth_records', side_effect=AssertionError('bulk JSON read in transfer')):
                     transfer_depth(root, droid, source, {0:row}, {0}, work)
             # Completed receipts do not trigger content rescans, even for legacy hashes.
             with patch('recam_refine.transfer.sha256', side_effect=AssertionError('repeat read')):
