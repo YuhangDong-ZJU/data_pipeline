@@ -90,7 +90,8 @@ def run(command, label, log, interval=30, capture=False):
             except (OSError, ValueError):
                 current = {'phase':'waiting for stage status'}
             emit(f'RUNNING elapsed={time.monotonic()-started:.0f}s '
-                 f'phase={current["phase"]} progress={current.get("completed",0)}/{current.get("total",1)}')
+                 f'phase={current["phase"]} progress={current.get("completed",0)}/{current.get("total",1)}' +
+                 (f' | {current["detail"]}' if current.get('detail') else ''))
     thread = None
     try:
         emit('RUNNING elapsed=0s phase=准备（准备任务） progress=0/1')

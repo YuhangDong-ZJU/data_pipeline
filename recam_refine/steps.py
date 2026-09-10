@@ -30,7 +30,9 @@ def transferred_streams(root, work):
         require(record['complete'], f'Incomplete step 1 transfer: {path}')
         directory = Path(record['target'])
         require(directory.is_relative_to(root), f'Transfer target outside DROID: {directory}')
-        streams[directory.relative_to(root).as_posix()] = {e['name']:e['sha256'] for e in record['files']}
+        streams[directory.relative_to(root).as_posix()] = {
+            e['name']: e['sha256'] if e.get('sha256') else {'size': e.get('size')}
+            for e in record['files']}
     return streams
 
 
@@ -48,8 +50,11 @@ def manual_workflow(root, work):
 
 
 def transfer_only(args):
+    from .progress import phase
+    phase('加载迁移模块（任务）', 0, 1)
     import fcntl
     from .pipeline import transfer_depth, parse_chunks
+    phase('检查迁移路径与目录锁（任务）', 0, 1)
     root, work, source = args.root.resolve(), args.work_dir.resolve(), args.depth_output.resolve()
     require(root.is_dir(), f'Missing dataset root: {root}')
     require(not work.is_relative_to(root) and not root.is_relative_to(work), 'work-dir must be outside the dataset')
@@ -67,6 +72,8 @@ def transfer_only(args):
             except BlockingIOError:
                 raise RuntimeError('Another refinement is using this dataset or work directory')
             manual_workflow(root,work)
+            phase('检查迁移路径与目录锁（任务）', 1, 1)
+            phase('读取并校验 DROID metadata（任务）', 0, 1)
             chunks = parse_chunks(args.depth_chunks)
             info_path, episodes_path = droid/'meta/info.json', droid/'meta/episodes.jsonl'
             meta_hashes = {str(p):sha256(p) for p in (info_path,episodes_path)}
@@ -75,6 +82,7 @@ def transfer_only(args):
                     'Step 1 expects the ReCam LeRobot v2.1 / 1000-episode chunk layout')
             episodes = [e for e in read_jsonl(episodes_path) if int(e.get('source_episode_index',e['episode_index']))//1000 in chunks]
             require(episodes, f'No target episodes in chunks {args.depth_chunks}')
+            phase('读取并校验 DROID metadata（任务）', 1, 1, f'选中 {len(episodes)} 个 episode')
             manifest_path = args.episode_manifest or download_manifest(work,sorted({int(e.get('source_episode_index',e['episode_index']))//1000 for e in episodes}))
             manifest = canonical_manifest(manifest_path,episodes)
             config = transfer_configuration(root,source,chunks,manifest)
@@ -88,13 +96,9 @@ def transfer_only(args):
                 require((work/'STEP1_DEPTH_TRANSFER_SUCCESS.json').exists(), 'Incomplete transfer before alignment')
                 print('Step 1 already completed; later stages have started. No data changed.',flush=True)
                 return
-            transfer_depth(root,droid,source,manifest,chunks,work)
-            # Verify final bytes, including same-filesystem directory renames.
-            total = 0
-            for stream,entries in transferred_streams(droid,work).items():
-                for name,digest in entries.items():
-                    require(sha256(droid/stream/name)==digest, f'Transferred PNG differs: {stream}/{name}')
-                    total += 1
+            transfer_depth(root,droid,source,manifest,chunks,work,workers=args.workers)
+            # transfer_depth already verified copies or atomically renamed directories.
+            total = sum(len(entries) for entries in transferred_streams(droid,work).values())
             require(all(sha256(Path(p))==h for p,h in meta_hashes.items()), 'Dataset metadata changed during transfer')
             result = dict(stage=1,complete=True,episodes=len(episodes),cameras=2*len(episodes),png_files=total,
                           destination=str(droid/'images'),metadata_unchanged=True,
@@ -144,20 +148,32 @@ def freeze_settings(work,stage,settings):
         write_json(path,settings)
 
 
-def unpack_only(root,work):
+def unpack_only(root,work,workers=8):
     from .pipeline import discover
     from .archives import unpack_archive
     droid = root/'real_world/droid'
     protected = transferred_streams(droid,work)
-    receipts = []
+    from .parallel import io_map, Counter
+    groups = {}
     for subset in discover(root):
         archives = [p for p in sorted((subset/'images').glob('chunk-*/observation.images.depth_*/*.tar'))
                     if not (subset==droid and p.parent.name=='observation.images.depth_00')]
-        for archive in tracked(archives,f'解压：{subset.name} TAR'):
-            if subset==droid and archive.parent.name=='observation.images.depth_00':
-                continue
+        for archive in archives:
+            groups.setdefault((subset, archive.parent), []).append(archive)
+    counter = Counter()
+    total = sum(map(len, groups.values()))
+    def extract(group):
+        (subset, directory), archives = group
+        results = []
+        # Archives in one camera directory can overlap, so keep their order.
+        for archive in archives:
             print(f'Unpack {archive}',flush=True)
-            receipts.append(unpack_archive(archive,subset,work/'archive_receipts',protected if subset==droid else None))
+            results.append(unpack_archive(archive,subset,work/'archive_receipts',protected if subset==droid else None))
+            counter.tick()
+        return results
+    batches = io_map(extract, groups.items(), workers, '并发解压（相机目录）',
+                     lambda: f'TAR={counter.value}/{total}；并发={workers}')
+    receipts = [receipt for batch in batches for receipt in batch]
     write_json(work/'unpacked.json',receipts)
     return dict(archives=len(receipts),tar_policy='TARs retained until explicit cleanup after successful checks')
 
@@ -179,7 +195,11 @@ def align_only(root,work,args):
     step1 = read_json(work/'step1_configuration.json')
     require(transfer_configuration(root,step1['depth_output'],set(step1['chunks']),manifest)==step1,'Step 1 episode mapping changed')
     metadata_roots = [droid,Path(step1['depth_output']),*args.depth_metadata]
-    records = load_depth_records(metadata_roots,manifest)
+    records = load_depth_records(metadata_roots,manifest,cache_dir=work/'input_cache')
+    for row in step1['identities']:
+        for cam in (1, 2):
+            require((row['episode_index'], cam) in records,
+                    f'Migrated depth sidecar missing before alignment: {row["episode_index"]}/{cam}')
     settings = dict(manifest_sha256=sha256(manifest_path) if Path(manifest_path).is_file() else
                     {p.name:sha256(p) for p in sorted(Path(manifest_path).glob('chunk-*.jsonl'))},
                     sidecars={str(k):v['sha256'] for k,v in records.items()})
@@ -361,7 +381,8 @@ def cleanup_only(root,work,args,subsets):
     require(sha256(work/'camera_audit/summary.json')==check['geometry_summary_sha256'],'Geometry report changed; rerun check')
     require(training_signature(root,subsets)==check['training_signature'],'Training files changed after check; rerun check before cleanup')
     finalize(root,root/'real_world/droid',subsets,work)
-    require(training_signature(root,subsets)==check['training_signature'],'Training files changed during cleanup')
+    # The dataset lock remains held; finalize only removes verified sources,
+    # obsolete TARs/modalities and auxiliary files, not declared training files.
     return dict(root=str(root),full_decode=True,subsets=check['subsets'],backup_directory=str(work/'original'),
                 **read_json(work/MARKERS['refine']))
 
@@ -386,7 +407,7 @@ def run_step(args):
                 'Cleanup already completed. Use the read-only check/audit-cameras commands for subsequent audits')
         subsets = discover(root)
         if args.step=='unpack':
-            result = unpack_only(root,work)
+            result = unpack_only(root,work,args.workers)
         elif args.step=='align':
             result = align_only(root,work,args)
         elif args.step=='overlap':

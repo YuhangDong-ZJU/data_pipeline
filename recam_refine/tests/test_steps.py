@@ -97,7 +97,7 @@ def manual_fixture(tmp):
 
 
 class ManualStepsTests(unittest.TestCase):
-    def test_transfer_without_normals_or_pointworld_and_preflight_before_moves(self):
+    def test_transfer_preserves_bytes_and_defers_png_decode_to_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = arguments(Path(tmp))
             droid = args.root/'real_world/droid'
@@ -108,15 +108,13 @@ class ManualStepsTests(unittest.TestCase):
             write_jsonl(args.episode_manifest,rows)
             source_depth(args.depth_output,rows)
             bad = args.depth_output/'images/chunk-000/observation.images.depth_02/episode_000000/frame_000001.png'
-            good_bytes = bad.read_bytes()
             bad.write_bytes(b'corrupt PNG')
-            before = all_files(droid)
-            with self.assertRaises(Exception):
-                transfer_only(args)
-            self.assertEqual(before,all_files(droid))
-            self.assertEqual(len(list(args.depth_output.glob('images/*/*/*/*.png'))),4)
-            bad.write_bytes(good_bytes)
             transfer_only(args)
+            copied = droid/bad.relative_to(args.depth_output)
+            self.assertEqual(copied.read_bytes(), b'corrupt PNG')
+            from recam_refine.archives import checked_png_array
+            with self.assertRaises(Exception):
+                checked_png_array(copied)
             expected = all_files(droid)
             self.assertEqual(read_json(args.work_dir/MARKERS['transfer'])['png_files'],4)
             self.assertFalse((args.work_dir/MARKERS['unpack']).exists())

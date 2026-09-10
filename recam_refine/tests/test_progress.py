@@ -59,13 +59,14 @@ class ProgressTests(unittest.TestCase):
             log = Path(tmp)/'stage.log'
             code = run([sys.executable, '-c',
                         "from recam_refine.progress import phase; import time; "
-                        "phase('verification', 2, 5); time.sleep(.3); raise SystemExit(7)"],
+                        "phase('verification', 2, 5, detail='chunk-006'); time.sleep(.3); raise SystemExit(7)"],
                        'test', log, interval=.05, capture=True)
             self.assertEqual(code, 7)
             output = log.read_text(encoding='utf-8')
             self.assertIn('phase=verification progress=2/5', output)
             self.assertIn('progress=2/5', output)
             self.assertIn('RUNNING elapsed=', output)
+            self.assertRegex(output, r'\[test\] RUNNING elapsed=.*progress=2/5 \| chunk-006')
             self.assertNotIn('pid=', output)
             self.assertNotIn('process alive', output)
             self.assertIn('FAILED exit_code=7', output)

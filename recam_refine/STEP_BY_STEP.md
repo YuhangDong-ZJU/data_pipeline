@@ -50,7 +50,7 @@ bash recam_refine/run_step.sh transfer "$RECAM_ROOT" "$RECAM_WORK" \
 执行内容：
 
 - 校对所选 episode 的 UUID、相机 serial、FoundationStereo sidecar、帧数及完整 PNG。
-- 所有选中流完成预检后，迁入 `real_world/droid/images/chunk-002` 到 `chunk-013` 的 `depth_01/02` 对应 episode/frame 路径。
+- 各相机序列核对文件名和数量后直接迁入 `real_world/droid/images/chunk-002` 到 `chunk-013` 的 `depth_01/02` 对应 episode/frame 路径。
 - 已有冲突文件先备份；迁移完成核对逐文件 SHA-256；原 metadata 保持不变。
 - 同盘优先移动，跨盘先复制并保留源 PNG，最终检查后的 `cleanup` 才清理源副本。
 

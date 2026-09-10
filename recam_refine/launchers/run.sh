@@ -148,8 +148,8 @@ if [[ "$GROUP" == prepare ]]; then
     fi
     step exclude-6795 exclude_episode_006795/SUCCESS.json --scan-report "$SCAN_REPORT"
   fi
-  step transfer STEP1_DEPTH_TRANSFER_SUCCESS.json --depth-output "$DEPTH_OUTPUT" --depth-chunks 2-13
-  step unpack STEP2_UNPACK_SUCCESS.json
+  step transfer STEP1_DEPTH_TRANSFER_SUCCESS.json --depth-output "$DEPTH_OUTPUT" --depth-chunks 2-13 --workers "$TRANSFER_WORKERS"
+  step unpack STEP2_UNPACK_SUCCESS.json --workers "$UNPACK_WORKERS"
   step align STEP3_ALIGN_SUCCESS.json --workers "$ALIGN_WORKERS"
   step overlap STEP4_OVERLAP_SUCCESS.json
   step shard-plan SHARD_PLAN_READY.json --num-shards 2 --refine-backend batched
@@ -192,7 +192,7 @@ else
       step check STEP5_CHECK_SUCCESS.json --workers "$CHECK_WORKERS" --audit-frames "$AUDIT_FRAMES"
       step cleanup SUCCESS.json
       step repack REPACK_SUCCESS.json --episodes-per-shard "$EPISODES_PER_TAR" --workers "$REPACK_WORKERS"
-      echo 'FINAL: DROID depth PNG + verified TAR; simulation PNG + original TAR; logs/backups outside dataset.' ;;
+      echo 'FINAL: DROID depth PNG + TAR; simulation PNG + original TAR; logs/backups outside dataset.' ;;
   esac
 fi
 printf '[%s] SUCCESS elapsed=%ss\n' "$GROUP" "$((SECONDS-STARTED))"

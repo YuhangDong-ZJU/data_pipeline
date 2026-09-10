@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
+from .progress import phase, tracked
 
 from .common import require, read_json, read_jsonl, write_json, write_jsonl, atomic_bytes, sha256
 
@@ -17,14 +20,24 @@ def download_manifest(work, chunks):
     versions = work/'hub_revisions.json'
     revisions = read_json(versions) if versions.exists() else {}
     repo = 'Sponbebob4258/droid-24k-external-svo'
+    phase('获取清单版本（任务）', 0, 1, repo)
     if repo not in revisions:
         revisions[repo] = HfApi().dataset_info(repo).sha
         write_json(versions,revisions)
+    phase('获取清单版本（任务）', 1, 1, revisions[repo])
     rows = []
-    for chunk in chunks:
-        path = hf_hub_download(repo,f'manifests/chunks/chunk-{chunk:03d}.jsonl',repo_type='dataset',
-                               revision=revisions[repo],local_dir=work/repo.split('/')[1])
+    chunks = list(chunks)
+    for count, chunk in enumerate(chunks):
+        phase('获取身份清单（chunk）', count, len(chunks), f'当前 chunk-{chunk:03d}；含网络请求和缓存检查')
+        kwargs = dict(repo_id=repo, filename=f'manifests/chunks/chunk-{chunk:03d}.jsonl', repo_type='dataset',
+                      revision=revisions[repo], local_dir=work/repo.split('/')[1])
+        from huggingface_hub.errors import LocalEntryNotFoundError
+        try:
+            path = hf_hub_download(**kwargs, local_files_only=True)
+        except LocalEntryNotFoundError:
+            path = hf_hub_download(**kwargs)
         rows.extend(read_jsonl(path))
+        phase('获取身份清单（chunk）', count + 1, len(chunks))
     output = work/'transfer_episode_manifest.jsonl'
     write_jsonl(output,rows)
     return output
@@ -81,7 +94,7 @@ def canonical_manifest(path, episodes):
     path = Path(path)
     paths = sorted(path.glob("chunk-*.jsonl")) if path.is_dir() else [path]
     rows = {}
-    for p in paths:
+    for p in tracked(paths, '读取身份清单（文件）'):
         for r in read_jsonl(p):
             i = int(r["episode_index"])
             require(i not in rows, f"Duplicate episode index in manifest: {i}")
@@ -96,7 +109,7 @@ def canonical_manifest(path, episodes):
     require(ids <= rows.keys(), f"Manifest misses episodes: {sorted(ids - rows.keys())[:20]}")
     selected = {i: dict(rows[original], episode_index=i, source_episode_index=original) for i, original in mapping.items()}
     require(len({r["source_episode_id"] for r in selected.values()}) == len(selected), "Duplicated source UUID")
-    for e in episodes:
+    for e in tracked(episodes, '核对 episode 身份（episode）'):
         r = selected[e["episode_index"]]
         require(0 <= int(r["length"]) - int(e["length"]) <= 2,
                 f"Manifest length/index mapping disagrees with current metadata: {e['episode_index']}")
@@ -105,8 +118,35 @@ def canonical_manifest(path, episodes):
     return selected
 
 
-def load_depth_records(roots, manifest):
+def load_depth_records(roots, manifest, cache_dir=None):
+    from .input_cache import InputCache
+    cache = InputCache(cache_dir, manifest)
+    try:
+        return _load_depth_records(roots, manifest, cache)
+    finally:
+        cache.close()
+        if cache_dir is not None:
+            print(f'Depth JSON: 已校验且未变化，跳过读取 {cache.hits} 个；需要读取 {cache.misses} 个', flush=True)
+
+
+def _sidecar_inputs(paths, cache):
+    # Bound both I/O concurrency and retained raw JSON memory on shared storage.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for start in range(0, len(paths), 32):
+            batch = [(p, cache.get(p)) for p in paths[start:start + 32]]
+            pending = {p: pool.submit(p.read_bytes) for p, saved in batch if saved is None}
+            for p, saved in batch:
+                yield p, pending[p].result() if saved is None else None, saved
+
+
+def _load_depth_records(roots, manifest, cache):
     records = {}
+    def merge(key, value, path):
+        if key in records:
+            a = {k:v for k,v in records[key].items() if k not in ('path', 'sha256')}
+            b = {k:v for k,v in value.items() if k not in ('path', 'sha256')}
+            require(a == b, f'Conflicting depth sidecars: {path}')
+        records[key] = value
     source_to_current = {int(r.get('source_episode_index', i)): i for i, r in manifest.items()}
     roots = list(dict.fromkeys(Path(p).resolve() for p in roots))
     for root in roots:
@@ -114,8 +154,16 @@ def load_depth_records(roots, manifest):
         if nested.is_dir():
             root = nested
         # Direct annotation root and standard conversion output are supported.
-        for p in root.glob("chunk-*/observation.images.depth_*/episode_*.json"):
-            d = read_json(p)
+        phase('枚举深度 JSON（目录任务）', 0, 1, str(root))
+        paths = sorted(root.glob("chunk-*/observation.images.depth_*/episode_*.json"))
+        phase('枚举深度 JSON（目录任务）', 1, 1, f'{root}；找到 {len(paths)} 个文件')
+        for p, raw, saved in tracked(_sidecar_inputs(paths, cache),
+                                    '深度 JSON：复用缓存或并发读取（文件）', len(paths)):
+            if saved is not None:
+                key, value = saved
+                merge(tuple(key), value, p)
+                continue
+            d = json.loads(raw)
             src = d["source"]
             original = int(src["episode_index"])
             if original not in source_to_current:
@@ -136,11 +184,8 @@ def load_depth_records(roots, manifest):
             require(all(a < b for a, b in zip(timestamps[:decoded-1], timestamps[1:decoded])), f"Unordered timestamps: {p}")
             require("FoundationStereo" in d["inference"]["method"], f"Wrong depth method: {p}")
             key = (i, int(role[-1]))
-            value = dict(path=str(p), sha256=sha256(p), frame_count=n, decoded=decoded, missing=missing,
+            value = dict(path=str(p), sha256=hashlib.sha256(raw).hexdigest(), frame_count=n, decoded=decoded, missing=missing,
                          intrinsic=d["calibration"]["intrinsic"], camera_serial=str(src["camera_serial"]))
-            if key in records:
-                a = {k:v for k,v in records[key].items() if k not in ("path", "sha256")}
-                b = {k:v for k,v in value.items() if k not in ("path", "sha256")}
-                require(a == b, f"Conflicting depth sidecars: {p}")
-            records[key] = value
+            merge(key, value, p)
+            cache.put(p, key, value)
     return records
