@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
-import shutil
 import stat
 import tarfile
 
@@ -210,10 +209,6 @@ def run_repack(args):
                 snapshot(part)
                 part.unlink()
                 sync_dir(part.parent)
-        # Avoid scanning every PNG up front just to estimate disk usage.
-        # Failed writes leave source PNGs intact and remove the partial TAR.
-        require(shutil.disk_usage(subset).free >= 64 * 1024 * 1024,
-                'Insufficient free disk space to start packing')
         print(f'Repack: {len(jobs)} TARs; source PNGs retained; no content hashes', flush=True)
         results = []
         with ThreadPoolExecutor(max_workers=args.workers) as pool:

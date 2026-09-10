@@ -147,7 +147,7 @@ class RepackTests(unittest.TestCase):
             for relative, digest in before.items():
                 self.assertEqual(sha256(args.root / relative), digest)
 
-    def test_wrong_archive_extra_episodes_and_low_disk_are_rejected(self):
+    def test_wrong_archive_extra_episodes_rejected_without_space_probe(self):
         with tempfile.TemporaryDirectory() as td:
             args, droid = completed_fixture(Path(td))
             camera = droid / 'images/chunk-000/observation.images.depth_01'
@@ -162,10 +162,10 @@ class RepackTests(unittest.TestCase):
                 run_repack(args)
             self.assertEqual(old.read_bytes(), b'preserve unknown archive')
             old.unlink()
-            with patch('recam_refine.repack.shutil.disk_usage', return_value=argparse.Namespace(free=0)):
-                with self.assertRaisesRegex(RefineError, 'Insufficient free disk'):
-                    run_repack(args)
-            self.assertFalse(list((droid / 'images').rglob('*.tar')))
+            with patch('shutil.disk_usage', side_effect=AssertionError('Unexpected space probe')):
+                run_repack(args)
+            self.assertTrue(read_json(args.work_dir / SUCCESS)['complete'])
+
 
 
 if __name__ == '__main__':
