@@ -241,9 +241,20 @@ def select(work, profile, cache, python=None, conda_env=None, leases=None, insta
                 addition = supplement(candidate, snapshot, packages, profile, cache, env)
                 report = check(candidate, fds)
                 report['supplement'] = addition
+            import errno
             import fcntl
             for lock in held:
-                fcntl.flock(lock, fcntl.LOCK_SH)
+                # Downgrade the exclusive install lease to a shared read lease so
+                # GPU/CPU workers can run concurrently. A direct EX->SH downgrade
+                # returns ENOSYS on some network/FUSE work filesystems, so release
+                # first and re-acquire shared; tolerate filesystems that do not
+                # implement shared locks at all (the install phase is already done).
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_UN)
+                    fcntl.flock(lock, fcntl.LOCK_SH)
+                except OSError as exc:
+                    if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP):
+                        raise
             if leases is not None:
                 leases.enter_context(trial.pop_all())
             return candidate, report, fds if leases is not None else ()
