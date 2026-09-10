@@ -48,8 +48,11 @@ def manual_workflow(root, work):
 
 
 def transfer_only(args):
+    from .progress import phase
+    phase('加载迁移模块（任务）', 0, 1)
     import fcntl
     from .pipeline import transfer_depth, parse_chunks
+    phase('检查迁移路径与目录锁（任务）', 0, 1)
     root, work, source = args.root.resolve(), args.work_dir.resolve(), args.depth_output.resolve()
     require(root.is_dir(), f'Missing dataset root: {root}')
     require(not work.is_relative_to(root) and not root.is_relative_to(work), 'work-dir must be outside the dataset')
@@ -67,6 +70,8 @@ def transfer_only(args):
             except BlockingIOError:
                 raise RuntimeError('Another refinement is using this dataset or work directory')
             manual_workflow(root,work)
+            phase('检查迁移路径与目录锁（任务）', 1, 1)
+            phase('读取并校验 DROID metadata（任务）', 0, 1)
             chunks = parse_chunks(args.depth_chunks)
             info_path, episodes_path = droid/'meta/info.json', droid/'meta/episodes.jsonl'
             meta_hashes = {str(p):sha256(p) for p in (info_path,episodes_path)}
@@ -75,6 +80,7 @@ def transfer_only(args):
                     'Step 1 expects the ReCam LeRobot v2.1 / 1000-episode chunk layout')
             episodes = [e for e in read_jsonl(episodes_path) if int(e.get('source_episode_index',e['episode_index']))//1000 in chunks]
             require(episodes, f'No target episodes in chunks {args.depth_chunks}')
+            phase('读取并校验 DROID metadata（任务）', 1, 1, f'选中 {len(episodes)} 个 episode')
             manifest_path = args.episode_manifest or download_manifest(work,sorted({int(e.get('source_episode_index',e['episode_index']))//1000 for e in episodes}))
             manifest = canonical_manifest(manifest_path,episodes)
             config = transfer_configuration(root,source,chunks,manifest)

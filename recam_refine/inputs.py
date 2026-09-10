@@ -5,6 +5,7 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 import tarfile
+from .progress import phase, tracked
 
 from .common import require, read_json, read_jsonl, write_json, write_jsonl, atomic_bytes, sha256
 
@@ -17,14 +18,19 @@ def download_manifest(work, chunks):
     versions = work/'hub_revisions.json'
     revisions = read_json(versions) if versions.exists() else {}
     repo = 'Sponbebob4258/droid-24k-external-svo'
+    phase('获取清单版本（任务）', 0, 1, repo)
     if repo not in revisions:
         revisions[repo] = HfApi().dataset_info(repo).sha
         write_json(versions,revisions)
+    phase('获取清单版本（任务）', 1, 1, revisions[repo])
     rows = []
-    for chunk in chunks:
+    chunks = list(chunks)
+    for count, chunk in enumerate(chunks):
+        phase('获取身份清单（chunk）', count, len(chunks), f'当前 chunk-{chunk:03d}；含网络请求和缓存检查')
         path = hf_hub_download(repo,f'manifests/chunks/chunk-{chunk:03d}.jsonl',repo_type='dataset',
                                revision=revisions[repo],local_dir=work/repo.split('/')[1])
         rows.extend(read_jsonl(path))
+        phase('获取身份清单（chunk）', count + 1, len(chunks))
     output = work/'transfer_episode_manifest.jsonl'
     write_jsonl(output,rows)
     return output
@@ -81,7 +87,7 @@ def canonical_manifest(path, episodes):
     path = Path(path)
     paths = sorted(path.glob("chunk-*.jsonl")) if path.is_dir() else [path]
     rows = {}
-    for p in paths:
+    for p in tracked(paths, '读取身份清单（文件）'):
         for r in read_jsonl(p):
             i = int(r["episode_index"])
             require(i not in rows, f"Duplicate episode index in manifest: {i}")
@@ -96,7 +102,7 @@ def canonical_manifest(path, episodes):
     require(ids <= rows.keys(), f"Manifest misses episodes: {sorted(ids - rows.keys())[:20]}")
     selected = {i: dict(rows[original], episode_index=i, source_episode_index=original) for i, original in mapping.items()}
     require(len({r["source_episode_id"] for r in selected.values()}) == len(selected), "Duplicated source UUID")
-    for e in episodes:
+    for e in tracked(episodes, '核对 episode 身份（episode）'):
         r = selected[e["episode_index"]]
         require(0 <= int(r["length"]) - int(e["length"]) <= 2,
                 f"Manifest length/index mapping disagrees with current metadata: {e['episode_index']}")
@@ -114,7 +120,10 @@ def load_depth_records(roots, manifest):
         if nested.is_dir():
             root = nested
         # Direct annotation root and standard conversion output are supported.
-        for p in root.glob("chunk-*/observation.images.depth_*/episode_*.json"):
+        phase('枚举深度 JSON（目录任务）', 0, 1, str(root))
+        paths = sorted(root.glob("chunk-*/observation.images.depth_*/episode_*.json"))
+        phase('枚举深度 JSON（目录任务）', 1, 1, f'{root}；找到 {len(paths)} 个文件')
+        for p in tracked(paths, '校验深度 JSON：身份、时间戳及 SHA256（文件）'):
             d = read_json(p)
             src = d["source"]
             original = int(src["episode_index"])
