@@ -32,7 +32,7 @@ def member_path(name, archive_relative):
     return rel
 
 
-def _check_png_bytes(data, label, shape, depth):
+def _check_png_bytes(data, label, shape, depth, pixels=False):
     with Image.open(io.BytesIO(data)) as im:
         require(im.format == "PNG", f"Not PNG: {label}")
         if shape:
@@ -40,7 +40,10 @@ def _check_png_bytes(data, label, shape, depth):
         if depth:
             require(im.mode in ("I;16", "I;16L", "I"), f"Depth is not uint16 grayscale: {label}: {im.mode}")
             require(len(data) >= 26 and data[24:26] == bytes([16, 0]), f"Depth PNG must be 16-bit grayscale: {label}")
-        im.verify()
+        im.load()
+        if pixels:
+            import numpy as np
+            return np.asarray(im)
 
 
 def check_png(path, shape=None, depth=True):
@@ -48,12 +51,9 @@ def check_png(path, shape=None, depth=True):
 
 
 def checked_png_array(path, shape=None, depth=True):
-    """Read storage once; verify CRC/header and decode the same bytes in memory."""
-    import numpy as np
+    """Read and decode once, without a separate PNG verify/CRC pass."""
     data = Path(path).read_bytes()
-    _check_png_bytes(data, path, shape, depth)
-    with Image.open(io.BytesIO(data)) as im:
-        return np.asarray(im)
+    return _check_png_bytes(data, path, shape, depth, pixels=True)
 
 
 def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):

@@ -10,7 +10,7 @@ from recam_refine.transfer import transfer_depth
 
 
 class LightTransferTests(unittest.TestCase):
-    def test_final_png_check_reads_once_and_rejects_corrupt_crc(self):
+    def test_final_png_decodes_once_without_verify_and_rejects_broken_data(self):
         import numpy as np
         from PIL import Image
         from recam_refine.archives import checked_png_array
@@ -19,7 +19,9 @@ class LightTransferTests(unittest.TestCase):
             expected = np.full((8, 8), 1234, dtype=np.uint16)
             Image.fromarray(expected).save(path)
             reader = Path.read_bytes
-            with patch.object(Path, 'read_bytes', autospec=True, side_effect=reader) as read:
+            from PIL.PngImagePlugin import PngImageFile
+            with patch.object(Path, 'read_bytes', autospec=True, side_effect=reader) as read, \
+                    patch.object(PngImageFile, 'verify', side_effect=AssertionError('redundant verify')):
                 np.testing.assert_array_equal(checked_png_array(path, (8, 8, 1)), expected)
                 self.assertEqual(read.call_count, 1)
             data = bytearray(reader(path))
