@@ -8,9 +8,8 @@ import re
 
 import numpy as np
 import pyarrow.parquet as pq
-from PIL import Image
 
-from .archives import check_png, frame_files
+from .archives import checked_png_array, frame_files
 from .common import array_hash, preserved_hashes, check_transform, media_path, parquet_path, read_json, read_jsonl, require, values, write_json
 from .media import decode_check
 from .stats import aggregate, table_stats, Moments
@@ -67,15 +66,13 @@ def validate_episode(args):
             require(len(files) == n, f"Image/meta length mismatch: {files[0].parent}")
             moments = Moments() if key in expected_stats else None
             for frame, p in enumerate(files):
-                check_png(p, feature["shape"], depth="depth_" in key)
-                with Image.open(p) as im:
-                    a = np.asarray(im)
-                    require(a.size and np.isfinite(a).all(), f"Invalid PNG: {p}")
-                    if strict_stats and "depth_" in key:
-                        require(a.any(), f"All-zero retained depth frame: {p}")
-                        require(np.all((a == 0) | ((a >= 20) & (a <= 10000))), f"Depth outside FoundationStereo range: {p}")
-                    if moments:
-                        moments.add(a.reshape(-1, feature["shape"][-1]), frames=1)
+                a = checked_png_array(p, feature["shape"], depth="depth_" in key)
+                require(a.size and np.isfinite(a).all(), f"Invalid PNG: {p}")
+                if strict_stats and "depth_" in key:
+                    require(a.any(), f"All-zero retained depth frame: {p}")
+                    require(np.all((a == 0) | ((a >= 20) & (a <= 10000))), f"Depth outside FoundationStereo range: {p}")
+                if moments:
+                    moments.add(a.reshape(-1, feature["shape"][-1]), frames=1)
                 png_count += 1
             if moments:
                 stats[key] = moments.result(media=True)

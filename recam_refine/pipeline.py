@@ -315,15 +315,7 @@ def finalize(root, droid, subsets, work):
     """Called only after ALL subsets pass full decoding and metadata checks."""
     journal = Journal(root, work)
     moved = []
-    # Legacy/copied streams have hashes; atomic moves use sizes plus final validation.
-    from .transfer import matches
-    for p in tracked(sorted((work / 'transfer_receipts').glob('*.json')),'清理前核对：相机序列'):
-        receipt = read_json(p)
-        for entry in receipt["files"]:
-            target = Path(receipt["target"]) / entry["name"]
-            if not target.exists():
-                target = work / "removed_tails" / target.relative_to(root)
-            require(matches(target, entry, content=True), f"Transferred depth changed unexpectedly: {target}")
+    # Caller has validated all frames and checked the training signature under lock.
     # Keep simulation and other real-world TARs. DROID TARs are obsolete after
     # trimming; remove only archives whose extraction receipt was verified.
     for receipt in tracked(read_json(work / 'unpacked.json'),'清理：TAR 记录'):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import os
 import re
 import tarfile
@@ -31,17 +32,28 @@ def member_path(name, archive_relative):
     return rel
 
 
-def check_png(path, shape=None, depth=True):
-    with Image.open(path) as im:
-        require(im.format == "PNG", f"Not PNG: {path}")
+def _check_png_bytes(data, label, shape, depth):
+    with Image.open(io.BytesIO(data)) as im:
+        require(im.format == "PNG", f"Not PNG: {label}")
         if shape:
-            require(im.size == (shape[1], shape[0]), f"PNG resolution mismatch: {path}")
+            require(im.size == (shape[1], shape[0]), f"PNG resolution mismatch: {label}")
         if depth:
-            require(im.mode in ("I;16", "I;16L", "I"), f"Depth is not uint16 grayscale: {path}: {im.mode}")
-            with Path(path).open("rb") as f:
-                header = f.read(26)
-            require(len(header) == 26 and header[24:26] == bytes([16, 0]), f"Depth PNG must be 16-bit grayscale: {path}")
+            require(im.mode in ("I;16", "I;16L", "I"), f"Depth is not uint16 grayscale: {label}: {im.mode}")
+            require(len(data) >= 26 and data[24:26] == bytes([16, 0]), f"Depth PNG must be 16-bit grayscale: {label}")
         im.verify()
+
+
+def check_png(path, shape=None, depth=True):
+    _check_png_bytes(Path(path).read_bytes(), path, shape, depth)
+
+
+def checked_png_array(path, shape=None, depth=True):
+    """Read storage once; verify CRC/header and decode the same bytes in memory."""
+    import numpy as np
+    data = Path(path).read_bytes()
+    _check_png_bytes(data, path, shape, depth)
+    with Image.open(io.BytesIO(data)) as im:
+        return np.asarray(im)
 
 
 def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):

@@ -33,7 +33,8 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
             require((i, cam) in records, f'Source depth sidecar missing: {i}/{cam}')
             names = [f'frame_{f:06d}.png' for f in range(records[i, cam]['frame_count'])]
             receipt_path = work/'transfer_receipts'/f'episode_{i:06d}_{cam}.json'
-            if receipt_path.exists():
+            existing_receipt = receipt_path.exists()
+            if existing_receipt:
                 receipt = read_json(receipt_path)
                 require(receipt['source'] == str(src) and receipt['target'] == str(dst), 'Transfer receipt path changed')
                 require([e['name'] for e in receipt['files']] == names, f'Transfer receipt frame count/names changed: {receipt_path}')
@@ -51,9 +52,10 @@ def transfer_depth(root, droid, source, manifest, chunks, work):
                 allowed = set(names)
                 require(all(p.name in allowed or p.name.endswith('.refine-part') for p in dst.iterdir()),
                         f'Extra target files: {dst}')
-            for entry in receipt['files']:
-                require(matches(dst/entry['name'], entry) or matches(src/entry['name'], entry),
-                        f'Missing source/target frame: {src/entry["name"]}')
+            if existing_receipt:
+                for entry in receipt['files']:
+                    require(matches(dst/entry['name'], entry) or matches(src/entry['name'], entry),
+                            f'Missing source/target frame: {src/entry["name"]}')
             jobs.append((i, cam, src, dst, receipt_path, receipt))
     results = []
     for i, cam, src, dst, receipt_path, receipt in tracked(jobs, '迁移深度（相机序列）'):

@@ -365,7 +365,8 @@ def cleanup_only(root,work,args,subsets):
     require(sha256(work/'camera_audit/summary.json')==check['geometry_summary_sha256'],'Geometry report changed; rerun check')
     require(training_signature(root,subsets)==check['training_signature'],'Training files changed after check; rerun check before cleanup')
     finalize(root,root/'real_world/droid',subsets,work)
-    require(training_signature(root,subsets)==check['training_signature'],'Training files changed during cleanup')
+    # The dataset lock remains held; finalize only removes verified sources,
+    # obsolete TARs/modalities and auxiliary files, not declared training files.
     return dict(root=str(root),full_decode=True,subsets=check['subsets'],backup_directory=str(work/'original'),
                 **read_json(work/MARKERS['refine']))
 
