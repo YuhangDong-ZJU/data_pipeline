@@ -108,11 +108,15 @@ def fetch_wheel(url, digest, path):
     ca = next((os.environ[n] for n in ('PIP_CERT', 'REQUESTS_CA_BUNDLE', 'SSL_CERT_FILE')
                if os.environ.get(n)), None)
     context = ssl.create_default_context(cafile=ca)
+    # Some wheel CDNs (e.g. PyTorch's R2/CloudFront) reject urllib's default
+    # "Python-urllib/x.y" agent with HTTP 403; send a pip-like User-Agent so the
+    # already-validated wheel URLs download the same way pip fetched them.
+    request = urllib.request.Request(url, headers={'User-Agent': 'pip/25.2'})
     temporary = path.with_suffix('.part')
     for attempt in range(4):
         try:
             sha = hashlib.sha256()
-            with urllib.request.urlopen(url, timeout=60, context=context) as source, temporary.open('wb') as dest:
+            with urllib.request.urlopen(request, timeout=60, context=context) as source, temporary.open('wb') as dest:
                 while block := source.read(1024 * 1024):
                     dest.write(block)
                     sha.update(block)
