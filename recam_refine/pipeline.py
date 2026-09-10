@@ -478,7 +478,7 @@ def _run_locked(args):
         finish("01_unpack")
     if not done("02_transfer"):
         if args.depth_output:
-            transfer_depth(root, droid, args.depth_output, manifest, parse_chunks(args.depth_chunks), work)
+            transfer_depth(root, droid, args.depth_output, manifest, parse_chunks(args.depth_chunks), work, workers=args.workers)
         finish("02_transfer")
     if not done("03_plan"):
         records = load_depth_records([droid, *args.depth_metadata, *([args.depth_output] if args.depth_output else [])], manifest)

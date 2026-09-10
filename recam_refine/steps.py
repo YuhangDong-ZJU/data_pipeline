@@ -96,7 +96,7 @@ def transfer_only(args):
                 require((work/'STEP1_DEPTH_TRANSFER_SUCCESS.json').exists(), 'Incomplete transfer before alignment')
                 print('Step 1 already completed; later stages have started. No data changed.',flush=True)
                 return
-            transfer_depth(root,droid,source,manifest,chunks,work)
+            transfer_depth(root,droid,source,manifest,chunks,work,workers=args.workers)
             # transfer_depth already verified copies or atomically renamed directories.
             total = sum(len(entries) for entries in transferred_streams(droid,work).values())
             require(all(sha256(Path(p))==h for p,h in meta_hashes.items()), 'Dataset metadata changed during transfer')
@@ -148,20 +148,32 @@ def freeze_settings(work,stage,settings):
         write_json(path,settings)
 
 
-def unpack_only(root,work):
+def unpack_only(root,work,workers=8):
     from .pipeline import discover
     from .archives import unpack_archive
     droid = root/'real_world/droid'
     protected = transferred_streams(droid,work)
-    receipts = []
+    from .parallel import io_map, Counter
+    groups = {}
     for subset in discover(root):
         archives = [p for p in sorted((subset/'images').glob('chunk-*/observation.images.depth_*/*.tar'))
                     if not (subset==droid and p.parent.name=='observation.images.depth_00')]
-        for archive in tracked(archives,f'解压：{subset.name} TAR'):
-            if subset==droid and archive.parent.name=='observation.images.depth_00':
-                continue
+        for archive in archives:
+            groups.setdefault((subset, archive.parent), []).append(archive)
+    counter = Counter()
+    total = sum(map(len, groups.values()))
+    def extract(group):
+        (subset, directory), archives = group
+        results = []
+        # Archives in one camera directory can overlap, so keep their order.
+        for archive in archives:
             print(f'Unpack {archive}',flush=True)
-            receipts.append(unpack_archive(archive,subset,work/'archive_receipts',protected if subset==droid else None))
+            results.append(unpack_archive(archive,subset,work/'archive_receipts',protected if subset==droid else None))
+            counter.tick()
+        return results
+    batches = io_map(extract, groups.items(), workers, '并发解压（相机目录）',
+                     lambda: f'TAR={counter.value}/{total}；并发={workers}')
+    receipts = [receipt for batch in batches for receipt in batch]
     write_json(work/'unpacked.json',receipts)
     return dict(archives=len(receipts),tar_policy='TARs retained until explicit cleanup after successful checks')
 
@@ -395,7 +407,7 @@ def run_step(args):
                 'Cleanup already completed. Use the read-only check/audit-cameras commands for subsequent audits')
         subsets = discover(root)
         if args.step=='unpack':
-            result = unpack_only(root,work)
+            result = unpack_only(root,work,args.workers)
         elif args.step=='align':
             result = align_only(root,work,args)
         elif args.step=='overlap':

@@ -148,8 +148,8 @@ if [[ "$GROUP" == prepare ]]; then
     fi
     step exclude-6795 exclude_episode_006795/SUCCESS.json --scan-report "$SCAN_REPORT"
   fi
-  step transfer STEP1_DEPTH_TRANSFER_SUCCESS.json --depth-output "$DEPTH_OUTPUT" --depth-chunks 2-13
-  step unpack STEP2_UNPACK_SUCCESS.json
+  step transfer STEP1_DEPTH_TRANSFER_SUCCESS.json --depth-output "$DEPTH_OUTPUT" --depth-chunks 2-13 --workers "$TRANSFER_WORKERS"
+  step unpack STEP2_UNPACK_SUCCESS.json --workers "$UNPACK_WORKERS"
   step align STEP3_ALIGN_SUCCESS.json --workers "$ALIGN_WORKERS"
   step overlap STEP4_OVERLAP_SUCCESS.json
   step shard-plan SHARD_PLAN_READY.json --num-shards 2 --refine-backend batched
