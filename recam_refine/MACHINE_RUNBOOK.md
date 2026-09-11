@@ -105,3 +105,21 @@ tail -f /mnt/bn/pistis/moranli/Data/recam_lerobot/recam_refine_work/launchers/ru
 ```
 
 总日志和原步骤日志均位于训练数据集之外。新入口之间有工作流锁：CPU 准备/收尾与 GPU 运行不能同时进行；两台 GPU 可并行，各分片另有重复启动保护。不要混用旧单步命令与正在运行的新入口来绕过工作流锁。
+
+### 单独按 chunk 解压（CPU）
+
+先完成 transfer。chunk 区间包含两端，作用于所有子集；不传 `--chunk-ids` 就处理全部。`--workers` 为同时处理的相机目录数，同目录内的 TAR 顺序处理。
+
+```bash
+export RECAM_ROOT="/mnt/bn/pistis/moranli/Data/recam_lerobot/recam_lerobot"
+export RECAM_WORK="/mnt/bn/pistis/moranli/Data/recam_lerobot/recam_refine_work"
+cd /mnt/bn/yuyingchen/moranli/Code/Research/ModelArch/data_pipeline
+
+# 解压 chunk 000 到 006，8 路并发
+bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 0-6 --workers 8
+
+# 接着处理 chunk 007 到 018
+bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 7-18 --workers 8
+```
+
+重跑会跳过有完成记录且文件属性未变化的 TAR，不读取 TAR 内容。没有记录的已有 PNG 需要与归档比较后补记，不能仅凭目录存在判断整个包完成。已完成的区间记录会合并保存；`UNPACK RANGE COMPLETE` 表示所选区间完成，`UNPACK COMPLETE` 表示全量完成。不要与正在执行的 `run_prepare.sh` 同时运行；停止旧进程、更新代码后再执行。全部区间完成后重跑 `run_prepare.sh`，会跳过 unpack 并继续后续步骤。

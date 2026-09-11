@@ -99,6 +99,7 @@ def main():
     p.add_argument('--work-dir',type=Path,required=True)
     p.add_argument('--episode-manifest',type=Path)
     p.add_argument('--depth-metadata',type=Path,nargs='*',default=[])
+    p.add_argument('--chunk-ids', help='unpack only: inclusive chunk range, e.g. 0-6 or 7-18; omitted means all subsets/chunks')
     p.add_argument('--pointworld-cameras',type=Path)
     p.add_argument('--workers',type=int,default=4)
     p.add_argument('--devices',default='0,1,2,3,4,5,6,7')

@@ -148,17 +148,21 @@ def freeze_settings(work,stage,settings):
         write_json(path,settings)
 
 
-def unpack_only(root,work,workers=8):
+def unpack_only(root,work,workers=8,chunks=None):
     from .pipeline import discover
     from .archives import unpack_archive
     droid = root/'real_world/droid'
     protected = transferred_streams(droid,work)
     from .parallel import io_map, Counter
     groups = {}
+    all_archives = set()
     for subset in discover(root):
         archives = [p for p in sorted((subset/'images').glob('chunk-*/observation.images.depth_*/*.tar'))
                     if not (subset==droid and p.parent.name=='observation.images.depth_00')]
         for archive in archives:
+            all_archives.add(str(archive))
+            if chunks is not None and int(archive.parent.parent.name.split('-')[1]) not in chunks:
+                continue
             groups.setdefault((subset, archive.parent), []).append(archive)
     counter = Counter()
     total = sum(map(len, groups.values()))
@@ -174,8 +178,12 @@ def unpack_only(root,work,workers=8):
     batches = io_map(extract, groups.items(), workers, '并发解压（相机目录）',
                      lambda: f'TAR={counter.value}/{total}；并发={workers}')
     receipts = [receipt for batch in batches for receipt in batch]
-    write_json(work/'unpacked.json',receipts)
-    return dict(archives=len(receipts),tar_policy='TARs retained until explicit cleanup after successful checks')
+    previous = read_json(work/'unpacked.json') if (work/'unpacked.json').exists() else []
+    combined = {r['archive']:r for r in previous if r['archive'] in all_archives}
+    combined.update({r['archive']:r for r in receipts})
+    write_json(work/'unpacked.json',list(combined.values()))
+    return dict(archives=len(combined),selected_archives=len(receipts),total_archives=len(all_archives),
+                all_chunks_complete=all_archives <= combined.keys(),tar_policy='TARs retained until explicit cleanup after successful checks')
 
 
 def align_only(root,work,args):
@@ -397,6 +405,8 @@ def run_step(args):
         print(json.dumps({stage:(work/name).exists() for stage,name in MARKERS.items()},indent=2),flush=True)
         return
     with locked_step(root,work):
+        chunk_ids = getattr(args, 'chunk_ids', None)
+        require(chunk_ids is None or args.step == 'unpack', '--chunk-ids is only supported for unpack')
         previous = PREVIOUS[args.step]
         require((work/MARKERS[previous]).exists(),f'Run {previous} first; missing {MARKERS[previous]}')
         marker = work/MARKERS[args.step]
@@ -407,7 +417,13 @@ def run_step(args):
                 'Cleanup already completed. Use the read-only check/audit-cameras commands for subsequent audits')
         subsets = discover(root)
         if args.step=='unpack':
-            result = unpack_only(root,work,args.workers)
+            from .pipeline import parse_chunks
+            chunks = parse_chunks(chunk_ids) if chunk_ids is not None else None
+            require(chunks is None or (chunks and min(chunks) >= 0), 'Invalid chunk range')
+            result = unpack_only(root,work,args.workers,chunks)
+            if not result['all_chunks_complete']:
+                print(f"UNPACK RANGE COMPLETE: selected={result['selected_archives']}; total completed={result['archives']}/{result['total_archives']}. Run remaining chunks before align.",flush=True)
+                return
         elif args.step=='align':
             result = align_only(root,work,args)
         elif args.step=='overlap':
