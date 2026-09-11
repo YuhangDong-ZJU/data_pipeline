@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from recam_refine.steps import unpack_only
-from recam_refine.common import read_json, write_json
+from recam_refine.common import read_json, write_json, safe_path
 
 class UnpackRangeTests(unittest.TestCase):
     def test_unrelated_transfer_receipts_are_not_read(self):
@@ -25,8 +25,10 @@ class UnpackRangeTests(unittest.TestCase):
                 return original_glob(path,pattern)
             with patch('recam_refine.pipeline.discover',return_value=[subset]), patch.object(Path,'glob',selected_glob), patch('recam_refine.steps.read_json',side_effect=AssertionError('No migration JSON reads')):
                 unpack_only(root,work,2,{14})
-                with patch('recam_refine.archives.tarfile.open',side_effect=AssertionError('Repeated TAR read')):
+                with patch('recam_refine.archives.tarfile.open',side_effect=AssertionError('Repeated TAR read')), patch('recam_refine.archives.safe_path', wraps=safe_path) as checked_paths:
                     unpack_only(root,work,2,{14})
+                    self.assertEqual(checked_paths.call_count, 1)
+                    self.assertFalse(str(checked_paths.call_args.args[1]).endswith('.png'))
 
     def test_ranges_merge_and_repeat_skips_payload(self):
         with tempfile.TemporaryDirectory() as td:

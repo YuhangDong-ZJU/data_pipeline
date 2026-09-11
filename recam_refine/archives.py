@@ -85,6 +85,15 @@ def _same_bytes(a, b):
 def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
     archive, subset = Path(archive), Path(subset)
     rel_archive = archive.relative_to(subset).as_posix()
+    directories = {}
+    def target_path(rel):
+        # Validate a stream directory once, not once for every PNG on shared storage.
+        require(PNG_PATH.fullmatch(rel), f'Unexpected depth path: {rel}')
+        relative = PurePosixPath(rel)
+        parent = relative.parent.as_posix()
+        if parent not in directories:
+            directories[parent] = safe_path(subset, parent)
+        return directories[parent]/relative.name
     receipt = Path(receipt_root) / (hashlib.sha256(str(archive).encode()).hexdigest() + ".json")
     archive_state = _file_state(archive)
     # Receipts are consumed only before any trimming starts.
@@ -92,7 +101,7 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
         saved = read_json(receipt)
         if _same_state(saved.get('archive_state'), archive_state) and 'target_states' in saved:
             for rel, state in saved['target_states'].items():
-                require(_same_state(_file_state(safe_path(subset, rel)), state), f'Extracted/migrated file changed: {rel}')
+                require(_same_state(_file_state(target_path(rel)), state), f'Extracted/migrated file changed: {rel}')
             print(f'SKIPPED 解压：已完成且文件属性未变化 {archive}', flush=True)
             return {k:saved[k] for k in ('archive', 'sha256', 'files', 'superseded_by_metric_depth', 'archive_state')}
         require((saved.get("archive_state") is None or _same_state(saved["archive_state"], archive_state)), f"Archive changed since extraction: {archive}")
@@ -114,7 +123,8 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
             rel = member_path(member.name, rel_archive)
             require(rel not in members, f"Duplicate TAR member: {rel}")
             members.add(rel)
-            target = safe_path(subset, rel)
+            target = target_path(rel)
+            require(not target.is_symlink(), f'Symlink is not supported: {target}')
             authority = authoritative_streams.get(PurePosixPath(rel).parent.as_posix())
             if authority is not None:
                 if target.name in authority:
