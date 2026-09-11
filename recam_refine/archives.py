@@ -115,6 +115,11 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
                     reusable[rel] = current
                 else:
                     repair.add(rel)
+                    expected_size = state[3] if state is not None else '无记录'
+                    reason = ('文件缺失' if current is None else
+                              f'大小不符：当前={current[3]} 字节，记录={expected_size} 字节'
+                              if stat.S_ISREG(current[2]) else '不是普通文件')
+                    print(f'REPAIR NEEDED 图片={target_path(rel)}；原因={reason}；来源 TAR={archive}', flush=True)
             if not repair:
                 print(f'SKIPPED 解压：已完成，文件存在且大小一致 {archive}', flush=True)
                 return {k:saved[k] for k in ('archive', 'sha256', 'files', 'superseded_by_metric_depth', 'archive_state')}
@@ -174,6 +179,12 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
                     os.replace(part, target)
                     sync_dir(target.parent)
                     bytes_written += size
+                    if rel in repair:
+                        print(f'REPAIRED 图片={target}；已从 TAR 恢复，写入={size} 字节；来源 TAR={archive}', flush=True)
+            except Exception as exc:
+                if rel in repair:
+                    print(f'REPAIR FAILED 图片={target}；来源 TAR={archive}；错误={type(exc).__name__}: {exc}', flush=True)
+                raise
             finally:
                 part.unlink(missing_ok=True)
             target_states[rel] = _file_state(target)

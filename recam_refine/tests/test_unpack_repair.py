@@ -45,8 +45,14 @@ class UnpackRepairTests(unittest.TestCase):
             def observe(tar,member):
                 extracted.append(member.name)
                 return original(tar,member)
-            with patch.object(tarfile.TarFile,'extractfile',observe):
+            with patch.object(tarfile.TarFile,'extractfile',observe), patch('builtins.print') as output:
                 unpack_archive(archive,subset,root/'receipts')
+            messages = '\n'.join(str(call.args[0]) for call in output.call_args_list)
+            self.assertIn('原因=文件缺失', messages)
+            self.assertIn('当前=3 字节，记录=8 字节', messages)
+            self.assertIn(f'REPAIRED 图片={directory}/frame_000001.png', messages)
+            self.assertIn(f'REPAIRED 图片={directory}/frame_000002.png', messages)
+            self.assertNotIn(f'REPAIRED 图片={good}', messages)
             self.assertEqual(len(extracted),2)
             self.assertFalse(any('frame_000000' in name for name in extracted))
             self.assertEqual(good.stat().st_mtime_ns,good_state.st_mtime_ns)
