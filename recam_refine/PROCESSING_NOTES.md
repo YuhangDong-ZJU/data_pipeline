@@ -20,7 +20,7 @@ Unpack assumes the partner layout: migrated DROID chunks 2–13 have PNGs and no
 old depth TARs. It no longer consults migration records to resolve overlapping
 old/new versions. A conflicting existing file causes an error rather than being
 silently overwritten. Completed TARs still use their existing extraction records
-and file attributes to skip payload reads; an interrupted TAR may be reread.
+and PNG existence/size to skip payload reads. PNG permissions and timestamps do not invalidate completion. Missing or wrong-size extracted files are restored from the same TAR; unchanged members are skipped. An interrupted TAR may be reread.
 
 Do not modify training data between final check and cleanup/repack: those stages
 now trust the successful check, rather than scanning all files again to detect

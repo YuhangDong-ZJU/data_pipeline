@@ -5,6 +5,7 @@ import hashlib
 import io
 import os
 import re
+import stat
 import tarfile
 from pathlib import Path, PurePosixPath
 
@@ -96,14 +97,28 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
         return directories[parent]/relative.name
     receipt = Path(receipt_root) / (hashlib.sha256(str(archive).encode()).hexdigest() + ".json")
     archive_state = _file_state(archive)
+    repair = set()
+    reusable = {}
     # Receipts are consumed only before any trimming starts.
     if receipt.exists():
         saved = read_json(receipt)
         if _same_state(saved.get('archive_state'), archive_state) and 'target_states' in saved:
             for rel, state in saved['target_states'].items():
-                require(_same_state(_file_state(target_path(rel)), state), f'Extracted/migrated file changed: {rel}')
-            print(f'SKIPPED 解压：已完成且文件属性未变化 {archive}', flush=True)
-            return {k:saved[k] for k in ('archive', 'sha256', 'files', 'superseded_by_metric_depth', 'archive_state')}
+                current = _file_state(target_path(rel))
+                if saved.get('superseded_by_metric_depth'):
+                    # Legacy overlapping archives must never restore obsolete depth.
+                    require(_same_state(current, state), f'Extracted/migrated file changed: {rel}')
+                valid = ((current is None and state is None) or
+                         (current is not None and state is not None and
+                          stat.S_ISREG(current[2]) and current[3] == state[3]))
+                if valid:
+                    reusable[rel] = current
+                else:
+                    repair.add(rel)
+            if not repair:
+                print(f'SKIPPED 解压：已完成，文件存在且大小一致 {archive}', flush=True)
+                return {k:saved[k] for k in ('archive', 'sha256', 'files', 'superseded_by_metric_depth', 'archive_state')}
+            print(f'REPAIR 解压：恢复 {len(repair)} 个缺失或大小不符的文件；其余 {len(reusable)} 个跳过 {archive}', flush=True)
         require((saved.get("archive_state") is None or _same_state(saved["archive_state"], archive_state)), f"Archive changed since extraction: {archive}")
     members = set()
     bytes_written = 0
@@ -124,6 +139,9 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
             require(rel not in members, f"Duplicate TAR member: {rel}")
             members.add(rel)
             target = target_path(rel)
+            if repair and rel in reusable:
+                target_states[rel] = reusable[rel]
+                continue
             require(not target.is_symlink(), f'Symlink is not supported: {target}')
             authority = authoritative_streams.get(PurePosixPath(rel).parent.as_posix())
             if authority is not None:
@@ -150,7 +168,7 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
                     dst.flush()
                     os.fsync(dst.fileno())
                 require(size == member.size, f"Truncated TAR member: {rel}")
-                if target.exists():
+                if target.exists() and rel not in repair:
                     require(_same_bytes(target, part), f"Existing PNG conflicts with TAR: {target}")
                 else:
                     os.replace(part, target)
@@ -160,6 +178,7 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
                 part.unlink(missing_ok=True)
             target_states[rel] = _file_state(target)
     require(members, f"Empty depth TAR: {archive}")
+    require(not (repair - members), f'Repair files absent from TAR: {sorted(repair-members)[:3]}')
     require(_file_state(archive) == archive_state, f'Archive changed during extraction: {archive}')
     write_json(receipt, dict(archive=str(archive), sha256=None, files=len(members),
                             bytes_written=bytes_written,superseded_by_metric_depth=superseded,
