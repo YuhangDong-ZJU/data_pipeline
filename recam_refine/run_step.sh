@@ -110,6 +110,11 @@ if sys.argv[3]=='transfer':
         raise SystemExit('ERROR: depth_output must exist and be separate from dataset and work_dir.')
 PY
 LOG_WORK="$RUNTIME_WORK"
+if [[ "$STEP" == unpack ]]; then
+  export RECAM_UNPACK_RUN_ID="${RECAM_UNPACK_RUN_ID:-$(hostname)-$$}"
+  LOG_WORK="$WORK_DIR/unpack_workers/$RECAM_UNPACK_RUN_ID"
+  mkdir -p "$LOG_WORK"
+fi
 if [[ "${RECAM_PROGRESS_CHILD:-0}" != 1 ]]; then
   PROGRESS_LOG="$LOG_WORK/step_${STEP}.log"
   if [[ "$STEP" == exclude-6795 ]]; then PROGRESS_LOG="$LOG_WORK/step_exclude_6795.log"; fi
@@ -194,5 +199,5 @@ if [[ "$STEP" == transfer ]]; then
     2>&1 | tee -a "$WORK_DIR/step_transfer.log"
 else
   "$RUNTIME_WORK/runtime/env/bin/python" -m recam_refine run-step "$STEP" "$DATASET" --work-dir "$WORK_DIR" "$@" \
-    2>&1 | tee -a "$RUNTIME_WORK/step_${STEP}.log"
+    2>&1 | tee -a "$LOG_WORK/step_${STEP}.log"
 fi

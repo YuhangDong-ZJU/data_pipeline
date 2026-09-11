@@ -344,8 +344,8 @@ def finalize(root, droid, subsets, work):
         p = Path(receipt["archive"])
         if p.is_relative_to(droid) and p.exists():
             if receipt.get('archive_state') is not None:
-                from .archives import _file_state
-                require(_file_state(p) == receipt['archive_state'], f'Archive changed during processing: {p}')
+                from .archives import _file_state, _same_state
+                require(_same_state(_file_state(p), receipt['archive_state']), f'Archive changed during processing: {p}')
             else:
                 # Old receipts without a file-state snapshot need one identity
                 # check before deleting their archive; new receipts use no hash.

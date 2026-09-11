@@ -64,6 +64,13 @@ def _file_state(path):
         return None
 
 
+def _same_state(a, b):
+    # Device/inode numbers can differ between clients of the same shared mount.
+    if a is None or b is None:
+        return a is b
+    return a[2:] == b[2:]
+
+
 def _same_bytes(a, b):
     with a.open('rb') as first, b.open('rb') as second:
         while True:
@@ -83,14 +90,14 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
     # Receipts are consumed only before any trimming starts.
     if receipt.exists():
         saved = read_json(receipt)
-        if saved.get('archive_state') == archive_state and 'target_states' in saved:
+        if _same_state(saved.get('archive_state'), archive_state) and 'target_states' in saved:
             for rel, state in saved['target_states'].items():
                 migrated = authoritative_streams and PurePosixPath(rel).parent.as_posix() in authoritative_streams
                 label = 'Migrated depth changed' if migrated else 'Extracted file changed'
-                require(_file_state(safe_path(subset, rel)) == state, f'{label}: {rel}')
+                require(_same_state(_file_state(safe_path(subset, rel)), state), f'{label}: {rel}')
             print(f'SKIPPED 解压：已完成且文件属性未变化 {archive}', flush=True)
             return {k:saved[k] for k in ('archive', 'sha256', 'files', 'superseded_by_metric_depth', 'archive_state')}
-        require(saved.get("archive_state") in (None, archive_state), f"Archive changed since extraction: {archive}")
+        require((saved.get("archive_state") is None or _same_state(saved["archive_state"], archive_state)), f"Archive changed since extraction: {archive}")
     members = set()
     bytes_written = 0
     superseded = 0

@@ -208,6 +208,9 @@ def main():
             from .common import write_json
             name = ('FAILED.json' if args.command=='run' else 'STEP1_FAILED.json' if args.command=='transfer-depth'
                     else args.step.upper()+'_FAILED.json')
+            if args.command == 'run-step' and args.step == 'unpack':
+                import os, socket
+                name = f'unpack_workers/{socket.gethostname()}-{os.getpid()}/UNPACK_FAILED.json'
             write_json(args.work_dir / name,
                        dict(error=str(exc), traceback=traceback.format_exc()))
         return 1

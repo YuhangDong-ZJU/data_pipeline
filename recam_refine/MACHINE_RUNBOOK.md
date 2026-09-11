@@ -122,4 +122,49 @@ bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --c
 bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 7-18 --workers 8
 ```
 
-重跑会跳过有完成记录且文件属性未变化的 TAR，不读取 TAR 内容。没有记录的已有 PNG 需要与归档比较后补记，不能仅凭目录存在判断整个包完成。已完成的区间记录会合并保存；`UNPACK RANGE COMPLETE` 表示所选区间完成，`UNPACK COMPLETE` 表示全量完成。不要与正在执行的 `run_prepare.sh` 同时运行；停止旧进程、更新代码后再执行。全部区间完成后重跑 `run_prepare.sh`，会跳过 unpack 并继续后续步骤。
+重跑会跳过有完成记录且文件属性未变化的 TAR，不读取 TAR 内容。没有记录的已有 PNG 需要与归档比较后补记，不能仅凭目录存在判断整个包完成。已完成的区间记录会合并保存；`UNPACK RANGE FINISHED` 表示本机所选区间已遍历（被其他机器占用的任务会跳过），`UNPACK COMPLETE` 表示全量完成。不要与正在执行的 `run_prepare.sh` 同时运行；停止旧进程、更新代码后再执行。全部区间完成后重跑 `run_prepare.sh`，会跳过 unpack 并继续后续步骤。
+
+### 三台 CPU 同时解压
+
+三台机器必须通过相同绝对路径访问同一数据集和同一个 `RECAM_WORK`。先停止所有旧解压进程，在共享仓库只更新一次；解压期间不更新共享代码、不运行 `run_prepare.sh` 或其他写入步骤。
+
+```bash
+cd /mnt/bn/yuyingchen/moranli/Code/Research/ModelArch/data_pipeline
+git pull --ff-only origin codex/recam-dataset-refine
+```
+
+每台机器先设置以下变量，再执行各自分配的命令：
+
+```bash
+cd /mnt/bn/yuyingchen/moranli/Code/Research/ModelArch/data_pipeline
+export RECAM_ROOT="/mnt/bn/pistis/moranli/Data/recam_lerobot/recam_lerobot"
+export RECAM_WORK="/mnt/bn/pistis/moranli/Data/recam_lerobot/recam_refine_work"
+```
+
+CPU A：chunk 000，预期 125 个 TAR（包含已完成的包）。
+
+```bash
+bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 0 --workers 4
+```
+
+CPU B：chunk 001–003，预期 164 个 TAR。
+
+```bash
+bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 1-3 --workers 4
+```
+
+CPU C：chunk 004–018，预期 164 个 TAR。
+
+```bash
+bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 4-18 --workers 4
+```
+
+已完成且属性未变化的 TAR 直接跳过；其他机器正在处理的 TAR/相机目录也会跳过。同相机目录内的 TAR 可能重叠，因此同目录保持顺序处理。中断后系统释放任务锁，重跑同一命令恢复。没有完成记录的半包可能重读。不要手工删除锁文件或完成记录。
+
+本机日志位于 `$RECAM_WORK/unpack_workers/<主机名>-<进程号>/step_unpack.log`，全局完成记录仍使用原来的 `STEP2_UNPACK_SUCCESS.json`。部分机器先结束不表示全量完成，最后完成的机器会合并共享记录。全部机器退出后，在一台 CPU 上执行：
+
+```bash
+bash run_prepare.sh
+```
+
+入口会跳过已完成解压；如有遗漏或中断任务，会先补齐再继续 align。共享盘必须支持跨机器文件锁；测试覆盖 Linux 多进程互斥和退出恢复，未在对方三台机器上实测锁服务。
