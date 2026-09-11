@@ -6,21 +6,14 @@ import unittest
 from pathlib import Path
 from argparse import Namespace
 from unittest.mock import patch
-from recam_refine.steps import locked_step, unpack_claim, run_step, MARKERS
+from recam_refine.steps import run_step, MARKERS
 from recam_refine.common import read_json, write_json
 
 
 def worker(root, work, chunk, start):
     start.wait(10)
-    run_step(Namespace(root=root,work_dir=work,step='unpack',chunk_ids=str(chunk),workers=2))
-
-
-def hold_claim(root, work, directory, ready):
-    with locked_step(root,work,shared=True), unpack_claim(work,directory,'cameras') as held:
-        assert held
-        ready.set()
-        import time
-        time.sleep(30)
+    with patch('fcntl.flock', side_effect=AssertionError('Unexpected file lock')):
+        run_step(Namespace(root=root,work_dir=work,step='unpack',chunk_ids=str(chunk),workers=2))
 
 
 class ConcurrentUnpackTests(unittest.TestCase):
@@ -50,28 +43,13 @@ class ConcurrentUnpackTests(unittest.TestCase):
                 child.join(15)
                 if child.is_alive(): child.terminate(); child.join()
                 self.assertEqual(child.exitcode,0)
+            self.assertFalse((work/'unpacked.json').exists())
+            self.assertFalse((work/MARKERS['unpack']).exists())
+            with patch('fcntl.flock', side_effect=AssertionError('Unexpected file lock')), patch('recam_refine.archives.tarfile.open', side_effect=AssertionError('Repeated payload read')):
+                run_step(Namespace(root=root,work_dir=work,step='unpack',chunk_ids=None,workers=2))
             self.assertEqual(len(read_json(work/'unpacked.json')),2)
             self.assertTrue(read_json(work/MARKERS['unpack'])['complete'])
             self.assertEqual(len(list(subset.rglob('*.png'))),2)
-
-    def test_busy_skip_exclusive_block_and_crash_recovery(self):
-        with tempfile.TemporaryDirectory() as td:
-            root,work,subset=self.setup_data(td)
-            context=mp.get_context('fork')
-            ready=context.Event()
-            child=context.Process(target=hold_claim,args=(root,work,subset/'images/chunk-000/observation.images.depth_01',ready))
-            child.start()
-            try:
-                self.assertTrue(ready.wait(10))
-                with self.assertRaisesRegex(RuntimeError,'Another refinement'):
-                    with locked_step(root,work): pass
-                run_step(Namespace(root=root,work_dir=work,step='unpack',chunk_ids='0',workers=2))
-                self.assertFalse((work/MARKERS['unpack']).exists())
-                self.assertFalse(list(subset.rglob('*.png')))
-            finally:
-                child.terminate(); child.join(5)
-            run_step(Namespace(root=root,work_dir=work,step='unpack',chunk_ids='0-1',workers=2))
-            self.assertTrue((work/MARKERS['unpack']).exists())
 
     def test_old_per_tar_receipt_survives_missing_global_index(self):
         from recam_refine.archives import unpack_archive
@@ -80,7 +58,8 @@ class ConcurrentUnpackTests(unittest.TestCase):
             archive=subset/'images/chunk-000/observation.images.depth_01/depth.tar'
             unpack_archive(archive,subset,work/'archive_receipts')
             run_step(Namespace(root=root,work_dir=work,step='unpack',chunk_ids='1',workers=2))
-            self.assertTrue((work/MARKERS['unpack']).exists())
+            self.assertFalse((work/MARKERS['unpack']).exists())
+            run_step(Namespace(root=root,work_dir=work,step='unpack',chunk_ids=None,workers=2))
             self.assertEqual(len(read_json(work/'unpacked.json')),2)
 
     def test_other_host_device_ids_do_not_force_reextraction(self):

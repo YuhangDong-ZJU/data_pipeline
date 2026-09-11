@@ -5,7 +5,7 @@ from .progress import phase, tracked, mapped
 import os
 from pathlib import Path
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import hashlib
 import json
 from concurrent.futures import ProcessPoolExecutor
@@ -136,37 +136,10 @@ def locked_step(root,work,shared=False):
                 acquire_directory_lock(fd,mode)
             except BlockingIOError:
                 raise RuntimeError('Another refinement is using this dataset or work directory')
-            with unpack_coordinator(work):
-                manual_workflow(root,work)
+            manual_workflow(root,work)
             yield
         finally:
             os.close(fd)
-
-
-@contextmanager
-def unpack_coordinator(work):
-    """Short shared-filesystem lock for publishing JSON, never held during I/O jobs."""
-    import fcntl
-    work.mkdir(parents=True, exist_ok=True)
-    with (work/'unpack_coordinator.lock').open('a+') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
-
-
-@contextmanager
-def unpack_claim(work, path, kind):
-    """OS releases the claim after exit/crash; all hosts use the shared work dir."""
-    import fcntl
-    folder = work/'unpack_locks'/kind
-    folder.mkdir(parents=True, exist_ok=True)
-    name = hashlib.sha256(str(path).encode()).hexdigest()
-    with (folder/(name+'.lock')).open('a+') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-        else:
-            yield True
 
 
 def freeze_settings(work,stage,settings):
@@ -198,40 +171,22 @@ def unpack_only(root,work,workers=8,chunks=None):
     def extract(group):
         (subset, directory), archives = group
         results = []
-        # TARs can overlap inside one camera directory. Claim the directory too.
-        with unpack_claim(work, directory, 'cameras') as claimed:
-            if not claimed:
-                print(f'SKIPPED 解压：其他机器正在处理 {directory}',flush=True)
-                return results
-            for archive in archives:
-                with unpack_claim(work, archive, 'archives') as claimed_tar:
-                    if not claimed_tar:
-                        print(f'SKIPPED 解压：其他机器正在处理 {archive}',flush=True)
-                        continue
-                    print(f'Unpack {archive}',flush=True)
-                    results.append(unpack_archive(archive,subset,work/'archive_receipts',protected if subset==droid else None))
-                    counter.tick()
+        for archive in archives:
+            print(f'Unpack {archive}',flush=True)
+            results.append(unpack_archive(archive,subset,work/'archive_receipts',protected if subset==droid else None))
+            counter.tick()
         return results
     batches = io_map(extract, groups.items(), workers, '并发解压（相机目录）',
                      lambda: f'TAR={counter.value}/{total}；并发={workers}')
     receipts = [receipt for batch in batches for receipt in batch]
-    with unpack_coordinator(work):
-        previous = read_json(work/'unpacked.json') if (work/'unpacked.json').exists() else []
-        combined = {r['archive']:r for r in previous if r['archive'] in all_archives}
-        combined.update({r['archive']:r for r in receipts})
-        # Recover existing completed TAR receipts, including those from an old
-        # interrupted process that never wrote the overall unpacked.json.
-        for archive in all_archives - combined.keys():
-            path = work/'archive_receipts'/(hashlib.sha256(archive.encode()).hexdigest()+'.json')
-            if path.exists():
-                saved = read_json(path)
-                if saved.get('archive') == archive:
-                    from .archives import _file_state, _same_state
-                    if _same_state(saved.get('archive_state'), _file_state(Path(archive))):
-                        combined[archive] = {k:saved[k] for k in ('archive','sha256','files','superseded_by_metric_depth','archive_state')}
-        write_json(work/'unpacked.json',list(combined.values()))
-        return dict(archives=len(combined),selected_archives=len(receipts),total_archives=len(all_archives),
-                    all_chunks_complete=all_archives <= combined.keys(),tar_policy='TARs retained until explicit cleanup after successful checks')
+    if chunks is not None:
+        # Disjoint chunk workers only publish existing per-TAR receipts.
+        # No shared summary, marker or read-modify-write between machines.
+        return dict(archives=len(receipts),selected_archives=len(receipts),total_archives=total,
+                    all_chunks_complete=False,range_only=True)
+    write_json(work/'unpacked.json',receipts)
+    return dict(archives=len(receipts),selected_archives=len(receipts),total_archives=total,
+                all_chunks_complete=True,tar_policy='TARs retained until explicit cleanup after successful checks')
 
 
 
@@ -453,7 +408,17 @@ def run_step(args):
     if args.step=='status':
         print(json.dumps({stage:(work/name).exists() for stage,name in MARKERS.items()},indent=2),flush=True)
         return
-    with locked_step(root,work,shared=args.step=='unpack'):
+    # Unpack relies on the operator assigning non-overlapping chunks.
+    # A no-range unpack is a single-machine completion pass after all workers exit.
+    with nullcontext() if args.step == 'unpack' else locked_step(root,work):
+        if args.step == 'unpack':
+            require(not (work/'configuration.json').exists(), 'This work directory belongs to an automatic run; resume its original command')
+            if (work/'manual_workflow.json').exists():
+                require(read_json(work/'manual_workflow.json') == dict(version=1,root=str(root)), 'Manual workflow dataset root changed')
+            require(root.is_dir() and (root/'real_world/droid').is_dir(), 'Missing DROID root')
+            require(not work.is_relative_to(root) and not root.is_relative_to(work), 'work-dir must be separate from dataset')
+            require(not (work/'exclude_episode_006795/plan.json').exists() or
+                    (work/'exclude_episode_006795/SUCCESS.json').exists(), 'Resume unfinished exclusion first')
         chunk_ids = getattr(args, 'chunk_ids', None)
         require(chunk_ids is None or args.step == 'unpack', '--chunk-ids is only supported for unpack')
         previous = PREVIOUS[args.step]
@@ -471,7 +436,7 @@ def run_step(args):
             require(chunks is None or (chunks and min(chunks) >= 0), 'Invalid chunk range')
             result = unpack_only(root,work,args.workers,chunks)
             if not result['all_chunks_complete']:
-                print(f"UNPACK RANGE FINISHED: selected={result['selected_archives']}; total completed={result['archives']}/{result['total_archives']}. Run remaining chunks before align.",flush=True)
+                print(f"UNPACK RANGE COMPLETE: TAR={result['selected_archives']}/{result['total_archives']}. After ALL machines exit, run unpack without --chunk-ids on ONE CPU to finalize.",flush=True)
                 return
         elif args.step=='align':
             result = align_only(root,work,args)
@@ -486,7 +451,6 @@ def run_step(args):
             result = check_only(root,work,args,subsets)
         elif args.step=='cleanup':
             result = cleanup_only(root,work,args,subsets)
-        with unpack_coordinator(work):
-            write_json(marker,{**result,'complete':True})
+        write_json(marker,{**result,'complete':True})
         (work/f'{args.step.upper()}_FAILED.json').unlink(missing_ok=True)
         print(f'{args.step.upper()} COMPLETE: {marker}. Stopped; no later step started.',flush=True)

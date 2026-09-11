@@ -122,7 +122,7 @@ bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --c
 bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 7-18 --workers 8
 ```
 
-重跑会跳过有完成记录且文件属性未变化的 TAR，不读取 TAR 内容。没有记录的已有 PNG 需要与归档比较后补记，不能仅凭目录存在判断整个包完成。已完成的区间记录会合并保存；`UNPACK RANGE FINISHED` 表示本机所选区间已遍历（被其他机器占用的任务会跳过），`UNPACK COMPLETE` 表示全量完成。不要与正在执行的 `run_prepare.sh` 同时运行；停止旧进程、更新代码后再执行。全部区间完成后重跑 `run_prepare.sh`，会跳过 unpack 并继续后续步骤。
+重跑会跳过有完成记录且文件属性未变化的 TAR，不读取 TAR 内容。没有记录的已有 PNG 需要与归档比较后补记，不能仅凭目录存在判断整个包完成。已完成的区间记录会合并保存；`UNPACK RANGE COMPLETE` 表示本机区间完成，`UNPACK COMPLETE` 表示全量完成。不要与正在执行的 `run_prepare.sh` 同时运行；停止旧进程、更新代码后再执行。全部机器退出后，不带 `--chunk-ids` 运行一次 unpack 汇总，再运行 `run_prepare.sh`。
 
 ### 三台 CPU 同时解压
 
@@ -159,12 +159,13 @@ CPU C：chunk 004–018，预期 164 个 TAR。
 bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --chunk-ids 4-18 --workers 4
 ```
 
-已完成且属性未变化的 TAR 直接跳过；其他机器正在处理的 TAR/相机目录也会跳过。同相机目录内的 TAR 可能重叠，因此同目录保持顺序处理。中断后系统释放任务锁，重跑同一命令恢复。没有完成记录的半包可能重读。不要手工删除锁文件或完成记录。
+已完成且属性未变化的 TAR 直接跳过。解压不使用文件锁，三台机器的 chunk 区间不能重叠，同一个区间不能重复启动。各机器只写独立 TAR 完成记录，不写公共汇总。中断后重跑原命令，已完成包跳过，半包可能重读。原来的完成记录继续复用。
 
-本机日志位于 `$RECAM_WORK/unpack_workers/<主机名>-<进程号>/step_unpack.log`，全局完成记录仍使用原来的 `STEP2_UNPACK_SUCCESS.json`。部分机器先结束不表示全量完成，最后完成的机器会合并共享记录。全部机器退出后，在一台 CPU 上执行：
+日志仍在 `$RECAM_WORK/unpack_workers/<主机名>-<进程号>/step_unpack.log`。三台全部退出后，在一台 CPU 上执行：
 
 ```bash
+bash recam_refine/run_step.sh unpack "$RECAM_ROOT" "$RECAM_WORK" --reuse-env --workers 4 &&
 bash run_prepare.sh
 ```
 
-入口会跳过已完成解压；如有遗漏或中断任务，会先补齐再继续 align。共享盘必须支持跨机器文件锁；测试覆盖 Linux 多进程互斥和退出恢复，未在对方三台机器上实测锁服务。
+不带 chunk 参数的 unpack 复用已有 TAR 记录，补齐遗漏并生成公共汇总及 `STEP2_UNPACK_SUCCESS.json`。它也不使用文件锁，因此只能在所有分片退出后单机执行。其他数据处理阶段的锁不在此次修改范围内。

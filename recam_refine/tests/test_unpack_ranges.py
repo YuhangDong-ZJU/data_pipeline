@@ -28,6 +28,10 @@ class UnpackRangeTests(unittest.TestCase):
                     repeated = unpack_only(root,work,2,{0})
                 self.assertEqual(repeated['archives'],1)
                 final = unpack_only(root,work,2,{1})
+                self.assertFalse(final['all_chunks_complete'])
+                self.assertFalse((work/'unpacked.json').exists())
+                with patch('recam_refine.archives.tarfile.open', side_effect=AssertionError('Repeated TAR read')):
+                    final = unpack_only(root,work,2)
                 self.assertTrue(final['all_chunks_complete'])
                 self.assertEqual(len(read_json(work/'unpacked.json')),2)
 
@@ -38,6 +42,7 @@ class UnpackRangeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root, work = Path(td)/'root', Path(td)/'work'
             work.mkdir()
+            (root/'real_world/droid').mkdir(parents=True)
             (work/MARKERS['transfer']).write_text('{}')
             args = Namespace(root=root, work_dir=work, step='unpack', chunk_ids='0-6', workers=3)
             result = dict(all_chunks_complete=False, selected_archives=1, archives=1, total_archives=2)
