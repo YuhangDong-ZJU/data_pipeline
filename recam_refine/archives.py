@@ -92,9 +92,7 @@ def unpack_archive(archive, subset, receipt_root, authoritative_streams=None):
         saved = read_json(receipt)
         if _same_state(saved.get('archive_state'), archive_state) and 'target_states' in saved:
             for rel, state in saved['target_states'].items():
-                migrated = authoritative_streams and PurePosixPath(rel).parent.as_posix() in authoritative_streams
-                label = 'Migrated depth changed' if migrated else 'Extracted file changed'
-                require(_same_state(_file_state(safe_path(subset, rel)), state), f'{label}: {rel}')
+                require(_same_state(_file_state(safe_path(subset, rel)), state), f'Extracted/migrated file changed: {rel}')
             print(f'SKIPPED 解压：已完成且文件属性未变化 {archive}', flush=True)
             return {k:saved[k] for k in ('archive', 'sha256', 'files', 'superseded_by_metric_depth', 'archive_state')}
         require((saved.get("archive_state") is None or _same_state(saved["archive_state"], archive_state)), f"Archive changed since extraction: {archive}")

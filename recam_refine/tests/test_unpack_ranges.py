@@ -5,9 +5,36 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from recam_refine.steps import unpack_only
-from recam_refine.common import read_json
+from recam_refine.common import read_json, write_json
 
 class UnpackRangeTests(unittest.TestCase):
+    def test_lazy_migration_receipts_and_selected_chunks(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, work = Path(td)/'root', Path(td)/'work'
+            subset = root/'real_world/droid'
+            stream = 'images/chunk-002/observation.images.depth_01/episode_002000'
+            target = subset/stream/'frame_000000.png'
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b'new-depth')
+            receipt = work/'transfer_receipts/episode_002000_1.json'
+            write_json(receipt, dict(complete=True,target=str(target.parent),files=[dict(name=target.name,size=9)]))
+            (receipt.parent/'episode_003000_1.json').write_text('unrelated invalid JSON')
+            with tarfile.open(target.parent.parent/'depth.tar','w') as tar:
+                item = tarfile.TarInfo(stream+'/'+target.name)
+                item.size = 3
+                tar.addfile(item,io.BytesIO(b'old'))
+            original_glob = Path.glob
+            def selected_glob(path, pattern):
+                self.assertNotEqual(path, receipt.parent, 'Must not scan migration receipts')
+                self.assertFalse('chunk-*' in pattern, 'Must select chunks before enumeration')
+                return original_glob(path,pattern)
+            with patch('recam_refine.pipeline.discover',return_value=[subset]), patch.object(Path,'glob',selected_glob), patch('recam_refine.steps.read_json', wraps=read_json) as reads:
+                unpack_only(root,work,2,{2})
+                self.assertEqual([call.args[0] for call in reads.call_args_list],[receipt])
+                self.assertEqual(target.read_bytes(),b'new-depth')
+                with patch('recam_refine.steps.read_json',side_effect=AssertionError('Completed TAR must not read migration receipts')), patch('recam_refine.archives.tarfile.open',side_effect=AssertionError('Repeated TAR read')):
+                    unpack_only(root,work,2,{2})
+
     def test_ranges_merge_and_repeat_skips_payload(self):
         with tempfile.TemporaryDirectory() as td:
             root, work = Path(td)/'root', Path(td)/'work'

@@ -143,7 +143,7 @@ class ManualStepsTests(unittest.TestCase):
             self.assertEqual(sha256(paths[0]),authority[directory.relative_to(root).as_posix()][paths[0].name])
             self.assertTrue(archive.exists())
             Image.fromarray(np.full((8,8),2000,np.uint16)).save(paths[0])
-            with self.assertRaisesRegex(RefineError,'Migrated depth changed'):
+            with self.assertRaisesRegex(RefineError,'Extracted/migrated file changed'):
                 unpack_archive(archive,root,Path(tmp)/'receipts',authority)
 
     def test_manual_lifecycle_resume_and_cleanup_gate(self):

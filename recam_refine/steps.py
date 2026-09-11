@@ -8,6 +8,7 @@ import argparse
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
+import re
 from concurrent.futures import ProcessPoolExecutor
 
 from .common import (require, read_json, read_jsonl, write_json, sha256, media_path, parquet_path,
@@ -34,6 +35,28 @@ def transferred_streams(root, work):
             e['name']: e['sha256'] if e.get('sha256') else {'size': e.get('size')}
             for e in record['files']}
     return streams
+
+
+class LazyTransferredStreams:
+    """Read only the migration receipt for a stream encountered in this TAR."""
+    def __init__(self, root, work):
+        self.root, self.work, self.cache = root, work, {}
+
+    def get(self, stream):
+        if stream not in self.cache:
+            match = re.fullmatch(r'images/chunk-\d{3}/observation\.images\.depth_0([12])/episode_(\d{6})', stream)
+            value = None
+            if match:
+                cam, episode = match.groups()
+                path = self.work/'transfer_receipts'/f'episode_{episode}_{cam}.json'
+                if path.exists():
+                    record = read_json(path)
+                    require(record['complete'], f'Incomplete step 1 transfer: {path}')
+                    require(Path(record['target']) == self.root/stream, f'Transfer target mismatch: {path}')
+                    value = {e['name']: e['sha256'] if e.get('sha256') else {'size': e.get('size')}
+                             for e in record['files']}
+            self.cache[stream] = value
+        return self.cache[stream]
 
 
 def manual_workflow(root, work):
@@ -154,22 +177,25 @@ def unpack_only(root,work,workers=8,chunks=None):
     from .pipeline import discover
     from .archives import unpack_archive
     droid = root/'real_world/droid'
-    protected = transferred_streams(droid,work)
     from .parallel import io_map, Counter
     groups = {}
-    all_archives = set()
-    for subset in discover(root):
-        archives = [p for p in sorted((subset/'images').glob('chunk-*/observation.images.depth_*/*.tar'))
-                    if not (subset==droid and p.parent.name=='observation.images.depth_00')]
-        for archive in archives:
-            all_archives.add(str(archive))
-            if chunks is not None and int(archive.parent.parent.name.split('-')[1]) not in chunks:
-                continue
-            groups.setdefault((subset, archive.parent), []).append(archive)
+    phase('查找数据子集（任务）', 0, 1)
+    subsets = discover(root)
+    for subset in subsets:
+        directories = ([subset/'images'/f'chunk-{i:03d}' for i in sorted(chunks)]
+                       if chunks is not None else sorted((subset/'images').glob('chunk-*')))
+        for index, directory in enumerate(directories):
+            phase('查找 TAR（chunk）', index, len(directories), str(directory))
+            for archive in sorted(directory.glob('observation.images.depth_*/*.tar')):
+                if subset==droid and archive.parent.name=='observation.images.depth_00':
+                    continue
+                groups.setdefault((subset, archive.parent), []).append(archive)
+        phase('查找 TAR（chunk）', len(directories), len(directories), str(subset))
     counter = Counter()
     total = sum(map(len, groups.values()))
     def extract(group):
         (subset, directory), archives = group
+        protected = LazyTransferredStreams(droid,work) if subset==droid else None
         results = []
         for archive in archives:
             print(f'Unpack {archive}',flush=True)
@@ -429,7 +455,7 @@ def run_step(args):
             return
         require(args.step!='check' or not (work/'SUCCESS.json').exists(),
                 'Cleanup already completed. Use the read-only check/audit-cameras commands for subsequent audits')
-        subsets = discover(root)
+        subsets = discover(root) if args.step != 'unpack' else None
         if args.step=='unpack':
             from .pipeline import parse_chunks
             chunks = parse_chunks(chunk_ids) if chunk_ids is not None else None
