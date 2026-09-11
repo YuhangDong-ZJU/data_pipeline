@@ -184,6 +184,30 @@ def check_transform(m, label):
     return m
 
 
+def copy_checked_size(source, target):
+    """Copy once; do not reread both files to hash the backup."""
+    before = source.stat()
+    shutil.copy2(source, target)
+    after = source.stat()
+    require(target.stat().st_size == before.st_size and
+            (before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
+            (after.st_size, after.st_mtime_ns, after.st_ctime_ns),
+            f'Copy incomplete/source changed: {source}')
+
+
+def same_file_bytes(first, second):
+    """Only resolve an existing destination before deleting a duplicate source."""
+    if first.stat().st_size != second.stat().st_size:
+        return False
+    with first.open('rb') as a, second.open('rb') as b:
+        while True:
+            left, right = a.read(1024*1024), b.read(1024*1024)
+            if left != right:
+                return False
+            if not left:
+                return True
+
+
 class Journal:
     """Back up before replacing; replaying an unfinished stage is idempotent.
 
@@ -201,8 +225,7 @@ class Journal:
         if path.exists() and not saved.exists():
             saved.parent.mkdir(parents=True, exist_ok=True)
             part = saved.with_name(saved.name + ".part")
-            shutil.copy2(path, part)
-            require(sha256(part) == sha256(path), f"Backup verification failed: {path}")
+            copy_checked_size(path, part)
             with part.open("rb") as f:
                 os.fsync(f.fileno())
             os.replace(part, saved)
@@ -229,14 +252,13 @@ class Journal:
         dest = safe_path(self.work / category, relative)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
-            require(path.is_file() and dest.is_file() and sha256(path) == sha256(dest), f"Retirement conflict: {path}")
+            require(path.is_file() and dest.is_file() and same_file_bytes(path, dest), f"Retirement conflict: {path}")
             path.unlink()
         else:
             # shutil.move supports separate mounts; copy is verified for files.
             if path.is_file() and path.stat().st_dev != dest.parent.stat().st_dev:
                 part = dest.with_name(dest.name + ".part")
-                shutil.copy2(path, part)
-                require(sha256(part) == sha256(path), f"Move verification failed: {path}")
+                copy_checked_size(path, part)
                 os.replace(part, dest)
                 path.unlink()
             else:
