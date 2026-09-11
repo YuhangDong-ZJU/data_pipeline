@@ -84,6 +84,10 @@ def manual_fixture(tmp):
                  camera_serials={'external_1':'a','external_2':'b'}) for i in range(2)]
     write_jsonl(args.episode_manifest,rows)
     source_depth(args.depth_output,rows)
+    # Direct unpack fixture: TAR bytes agree with the transferred PNGs.
+    with tarfile.open(archives[0], 'w') as tar:
+        for p in sorted((args.depth_output/'images/chunk-000/observation.images.depth_01').glob('episode_*/*.png')):
+            tar.add(p, arcname=p.relative_to(args.depth_output).as_posix())
     c2w = np.eye(4)
     c2w[0,3] = .02
     for row in rows:
@@ -190,12 +194,6 @@ class ManualStepsTests(unittest.TestCase):
                 stage(args,'check')
             self.assertTrue(all(p.exists() for p in archives))
             self.assertTrue((droid/'logs/run.log').exists())
-            video = droid/'videos/chunk-000/observation.images.rgb_01/episode_000000.mp4'
-            stat = video.stat()
-            os.utime(video,ns=(stat.st_atime_ns,stat.st_mtime_ns+1_000_000))
-            with self.assertRaisesRegex(RefineError,'Training files changed after check'):
-                stage(args,'cleanup')
-            self.assertTrue(all(p.exists() for p in archives))
             with patch('recam_refine.audit._run_audit_locked',return_value=2):
                 with self.assertRaisesRegex(RefineError,'Geometry requires review'):
                     stage(args,'check')

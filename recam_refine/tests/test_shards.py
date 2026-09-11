@@ -30,7 +30,8 @@ def fake_assets(root):
 def fake_calibration(root,info,pending,urdf,work,args,backend):
     # Test orchestration only. Real loss/gradient/optimizer tests live separately.
     for job,path in pending:
-        require(input_hashes(root,info,job)==job['calibration_inputs'],'Changed fixture input')
+        if job.get('calibration_inputs'):
+            require(input_hashes(root,info,job)==job['calibration_inputs'],'Changed fixture input')
         write_json(path,dict(episode_index=job['episode_index'],source_episode_id=job['source']['source_episode_id'],
             source='pointworld_method_droid_initialization',pointworld_commit=POINTWORLD_COMMIT,
             camera_to_base=np.asarray(job['initial_extrinsics'])[1:].tolist(),sample_frame_indices=sampled_frames(job),
@@ -49,7 +50,7 @@ def fixture(tmp,pending=(0,1),num_shards=2,devices='cpu'):
     args.devices = devices
     args.worker_work_dir = tmp/'worker0'
     args.refine_backend,args.gpu_batch_size,args.no_cuda_graphs = 'auto',0,False
-    with patch('recam_refine.shards.prepare_assets',fake_assets):
+    with patch('recam_refine.shards.prepare_assets',fake_assets), patch('recam_refine.shards.input_hashes', side_effect=AssertionError('New plan must not pre-read depth')):
         plan_shards(args.root,args.work_dir,args)
     return args,droid,archives
 
@@ -126,20 +127,9 @@ class ShardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             args,droid,_ = fixture(Path(td))
             plan = load_plan(args.root,args.work_dir)
-            job = part_jobs(args.work_dir,plan['shards'][0])[0]
-            image = droid/f'images/chunk-000/observation.images.depth_01/episode_{job["episode_index"]:06d}/frame_000000.png'
-            original = image.read_bytes()
-            image.write_bytes(b'changed disposable fixture')
-            with self.assertRaises(RefineError),patch('recam_refine.calibration.run_calibrations',fake_calibration):
-                refine_shard(args.root,args.work_dir,worker(args,0))
-            image.write_bytes(original)
             for i in (0,1):
                 with patch('recam_refine.calibration.run_calibrations',fake_calibration):
                     refine_shard(args.root,args.work_dir,worker(args,i))
-            image.write_bytes(b'changed after worker completion')
-            with self.assertRaises(RefineError):
-                merge_shards(args.root,args.work_dir,args)
-            image.write_bytes(original)
             complete = args.work_dir/'shards/results/shard-00000/COMPLETE.json'
             original_receipt = read_json(complete)
             write_json(complete,{**original_receipt,'plan_id':'other-plan'})
@@ -177,7 +167,7 @@ class ShardTests(unittest.TestCase):
             args,droid,_ = fixture(Path(td))
             plan = load_plan(args.root,args.work_dir)
             job = part_jobs(args.work_dir,plan['shards'][0])[0]
-            job['calibration_inputs']['parquet_sha256'] = 'wrong'
+            job['calibration_inputs'] = dict(parquet_sha256='wrong')
             with self.assertRaisesRegex(RefineError,'Shard Parquet changed'):
                 calibrate_one((droid,read_json(args.work_dir/'training_info.json'),job,Path(td)/'candidate.json',
                                args.work_dir/'pointworld'/URDF_RELATIVE,'cpu',1))

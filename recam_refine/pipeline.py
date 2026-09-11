@@ -337,7 +337,7 @@ def finalize(root, droid, subsets, work):
     """Called only after ALL subsets pass full decoding and metadata checks."""
     journal = Journal(root, work)
     moved = []
-    # Caller has validated all frames and checked the training signature under lock.
+    # Caller has completed frame, metadata and geometry validation.
     # Keep simulation and other real-world TARs. DROID TARs are obsolete after
     # trimming; remove only archives whose extraction receipt was verified.
     for receipt in tracked(read_json(work / 'unpacked.json'),'清理：TAR 记录'):

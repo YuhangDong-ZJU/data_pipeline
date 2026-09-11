@@ -103,10 +103,6 @@ def plan_shards(root,work,args):
         parts = []
         for shard_id in range(args.num_shards):
             part_jobs = pending[shard_id::args.num_shards]
-            for n,job in enumerate(tracked(part_jobs,f'分片 {shard_id} 摘要：episode'),1):
-                job['calibration_inputs'] = input_hashes(root/'real_world/droid',info,job)
-                if n%100==0 or n==len(part_jobs):
-                    print(f'Plan shard {shard_id}: hash inputs {n}/{len(part_jobs)}',flush=True)
             relative = f'shards/manifests/shard-{shard_id:05d}.json'
             require_equal_file(work/relative,dict(shard_id=shard_id,jobs=part_jobs))
             parts.append(dict(shard_id=shard_id,path=relative,sha256=sha256(work/relative),
@@ -118,7 +114,7 @@ def plan_shards(root,work,args):
         require_equal_file(work/PLAN,{**body,'plan_id':digest(body)})
         write_json(work/READY,dict(plan_id=digest(body),plan_sha256=sha256(work/PLAN),complete=True))
         write_json(work/'shards/plan_timing.json',dict(elapsed_seconds=time.perf_counter()-started,
-                   pending_episodes=len(pending),shards=args.num_shards,scope='Plan and sampled-input hashing; excludes runtime installation'))
+                   pending_episodes=len(pending),shards=args.num_shards,scope='Plan only; depth is read during optimization'))
         print(f'SHARD PLAN COMPLETE: {len(pending)} optimized + {len(released)} released episodes; {args.num_shards} shards',flush=True)
 
 
@@ -178,7 +174,7 @@ def worker_locks(root,work,local,shard_id):
 
 def provenance(plan,part,job):
     return dict(plan_id=plan['plan_id'],shard_id=part['shard_id'],manifest_sha256=part['sha256'],
-                input_sha256=digest(job['calibration_inputs']))
+                input_sha256=digest(job.get('calibration_inputs', {})))
 
 
 def validate_candidate(value,job,plan,part,require_provenance=True):
@@ -216,7 +212,8 @@ def validate_candidate(value,job,plan,part,require_provenance=True):
 
 
 def verify_inputs(root,info,jobs):
-    for n,job in enumerate(tracked(jobs,'校验分片输入：episode'),1):
+    jobs = [job for job in jobs if job.get('calibration_inputs')]
+    for n,job in enumerate(tracked(jobs,'校验旧分片输入：episode'),1):
         require(input_hashes(root/'real_world/droid',info,job)==job['calibration_inputs'],
                 f'Calibration input bytes changed: episode {job["episode_index"]}')
         if n%100==0 or n==len(jobs):

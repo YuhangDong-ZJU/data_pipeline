@@ -130,3 +130,4 @@ def transfer_depth(root, droid, source, manifest, chunks, work, workers=8):
                      lambda: f'已处理 PNG={counter.value}；并发={workers}')
     require(results, f'No episodes selected in depth chunks {chunks}')
     write_json(work/'depth_transfer.json', results)
+    return results

@@ -8,7 +8,6 @@ import argparse
 from contextlib import contextmanager, nullcontext
 import hashlib
 import json
-import re
 from concurrent.futures import ProcessPoolExecutor
 
 from .common import (require, read_json, read_jsonl, write_json, sha256, media_path, parquet_path,
@@ -21,42 +20,6 @@ def transfer_configuration(root, source, chunks, manifest):
         identities=[dict(episode_index=i,source_episode_id=r['source_episode_id'],length=int(r['length']),
                          camera_serials={c:str(r['camera_serials'][c]) for c in ('external_1','external_2')})
                     for i,r in sorted(manifest.items()) if int(r.get('source_episode_index',i))//1000 in chunks])
-
-
-def transferred_streams(root, work):
-    """Authoritative new streams supersede old TAR versions during step 2."""
-    streams = {}
-    for path in sorted((work/'transfer_receipts').glob('*.json')):
-        record = read_json(path)
-        require(record['complete'], f'Incomplete step 1 transfer: {path}')
-        directory = Path(record['target'])
-        require(directory.is_relative_to(root), f'Transfer target outside DROID: {directory}')
-        streams[directory.relative_to(root).as_posix()] = {
-            e['name']: e['sha256'] if e.get('sha256') else {'size': e.get('size')}
-            for e in record['files']}
-    return streams
-
-
-class LazyTransferredStreams:
-    """Read only the migration receipt for a stream encountered in this TAR."""
-    def __init__(self, root, work):
-        self.root, self.work, self.cache = root, work, {}
-
-    def get(self, stream):
-        if stream not in self.cache:
-            match = re.fullmatch(r'images/chunk-\d{3}/observation\.images\.depth_0([12])/episode_(\d{6})', stream)
-            value = None
-            if match:
-                cam, episode = match.groups()
-                path = self.work/'transfer_receipts'/f'episode_{episode}_{cam}.json'
-                if path.exists():
-                    record = read_json(path)
-                    require(record['complete'], f'Incomplete step 1 transfer: {path}')
-                    require(Path(record['target']) == self.root/stream, f'Transfer target mismatch: {path}')
-                    value = {e['name']: e['sha256'] if e.get('sha256') else {'size': e.get('size')}
-                             for e in record['files']}
-            self.cache[stream] = value
-        return self.cache[stream]
 
 
 def manual_workflow(root, work):
@@ -120,9 +83,9 @@ def transfer_only(args):
                 require((work/'STEP1_DEPTH_TRANSFER_SUCCESS.json').exists(), 'Incomplete transfer before alignment')
                 print('Step 1 already completed; later stages have started. No data changed.',flush=True)
                 return
-            transfer_depth(root,droid,source,manifest,chunks,work,workers=args.workers)
+            transferred = transfer_depth(root,droid,source,manifest,chunks,work,workers=args.workers)
             # transfer_depth already verified copies or atomically renamed directories.
-            total = sum(len(entries) for entries in transferred_streams(droid,work).values())
+            total = sum(row['frame_count'] for row in transferred)
             require(all(sha256(Path(p))==h for p,h in meta_hashes.items()), 'Dataset metadata changed during transfer')
             result = dict(stage=1,complete=True,episodes=len(episodes),cameras=2*len(episodes),png_files=total,
                           destination=str(droid/'images'),metadata_unchanged=True,
@@ -195,11 +158,10 @@ def unpack_only(root,work,workers=8,chunks=None):
     total = sum(map(len, groups.values()))
     def extract(group):
         (subset, directory), archives = group
-        protected = LazyTransferredStreams(droid,work) if subset==droid else None
         results = []
         for archive in archives:
             print(f'Unpack {archive}',flush=True)
-            results.append(unpack_archive(archive,subset,work/'archive_receipts',protected if subset==droid else None))
+            results.append(unpack_archive(archive,subset,work/'archive_receipts'))
             counter.tick()
         return results
     batches = io_map(extract, groups.items(), workers, '并发解压（相机目录）',
@@ -359,46 +321,11 @@ def apply_only(root,work,args):
     return dict(episodes=len(jobs),frames=offset)
 
 
-def training_signature(root,subsets):
-    """Stream a fingerprint of declared training files; cleanup leaves these intact.
-
-    Metadata contents are hashed; media uses size/mtime/ctime so manual pauses do
-    not require re-reading terabytes just to detect a changed dataset.
-    """
-    digest,count = hashlib.sha256(),0
-    def add(path,content=False):
-        nonlocal count
-        require(path.is_file() and not path.is_symlink(),f'Missing/linked training file: {path}')
-        stat = path.stat()
-        value = [path.relative_to(root).as_posix(),stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns]
-        if content:
-            value.append(sha256(path))
-        digest.update(json.dumps(value,separators=(',',':')).encode()+b'\n')
-        count += 1
-    for subset in subsets:
-        info = read_json(subset/'meta/info.json')
-        for path in sorted((subset/'meta').iterdir()):
-            if path.is_file() and path.suffix in ('.json','.jsonl') and not path.name.endswith('failures.jsonl'):
-                add(path,True)
-        for episode in tracked(read_jsonl(subset/'meta/episodes.jsonl'),f'训练文件摘要：{subset.name} episode'):
-            i,n = episode['episode_index'],episode['length']
-            add(parquet_path(subset,info,i))
-            for key,feature in sorted(info['features'].items()):
-                if feature['dtype']=='video':
-                    add(media_path(subset,info,i,key))
-                elif feature['dtype']=='image':
-                    directory = media_path(subset,info,i,key,0).parent
-                    for f in range(n):
-                        add(directory/f'frame_{f:06d}.png')
-    return dict(files=count,sha256=digest.hexdigest())
-
-
 def check_only(root,work,args,subsets):
     from .validate import check_subset
     from .audit import _run_audit_locked
     marker = work/MARKERS['check']
     marker.unlink(missing_ok=True)
-    before = training_signature(root,subsets)
     summaries = [check_subset(s,work/'checks',args.workers,droid=s==root/'real_world/droid') for s in subsets]
     write_json(work/'checks.json',summaries)
     audit = argparse.Namespace(root=root,work_dir=work,report_dir=work/'camera_audit',episodes=['all'],
@@ -407,8 +334,7 @@ def check_only(root,work,args,subsets):
         candidate_dir=None,depth_metadata=[],fail_on_review=True)
     status = _run_audit_locked(audit)
     require(status==0,'Geometry requires review; see camera_audit/index.html. Cleanup is not enabled')
-    require(training_signature(root,subsets)==before,'Training files changed during validation; rerun check')
-    return dict(full_decode=True,subsets=summaries,training_signature=before,
+    return dict(full_decode=True,subsets=summaries,
                 geometry_summary_sha256=sha256(work/'camera_audit/summary.json'))
 
 
@@ -417,7 +343,6 @@ def cleanup_only(root,work,args,subsets):
     check = read_json(work/MARKERS['check'])
     require(not (work/'camera_audit/QUALITY_REVIEW_REQUIRED.json').exists(),'Geometry review is still required')
     require(sha256(work/'camera_audit/summary.json')==check['geometry_summary_sha256'],'Geometry report changed; rerun check')
-    require(training_signature(root,subsets)==check['training_signature'],'Training files changed after check; rerun check before cleanup')
     finalize(root,root/'real_world/droid',subsets,work)
     # The dataset lock remains held; finalize only removes verified sources,
     # obsolete TARs/modalities and auxiliary files, not declared training files.

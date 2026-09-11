@@ -12,7 +12,7 @@ import tarfile
 from .archives import frame_files, member_path
 from .common import media_path, read_json, read_jsonl, require, safe_path, sha256, sync_dir, write_json
 from .pipeline import discover
-from .steps import MARKERS, freeze_settings, locked_step, training_signature
+from .steps import MARKERS, freeze_settings, locked_step
 
 
 SUCCESS = 'REPACK_SUCCESS.json'
@@ -42,9 +42,6 @@ def checked_dataset(root, work):
     require(not (work / 'camera_audit/QUALITY_REVIEW_REQUIRED.json').exists(), 'Geometry still requires review')
     require(sha256(work / 'camera_audit/summary.json') == check['geometry_summary_sha256'],
             'Geometry report changed after check')
-    print('Repack: checking final training file state', flush=True)
-    require(training_signature(root, discover(root)) == check['training_signature'],
-            'Training files changed after check; do not repack an unverified dataset')
     return {stage: sha256(work / MARKERS[stage]) for stage in ('check', 'cleanup')}
 
 

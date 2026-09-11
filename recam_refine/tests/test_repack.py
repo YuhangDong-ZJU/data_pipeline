@@ -94,12 +94,10 @@ class RepackTests(unittest.TestCase):
             with self.assertRaisesRegex(RefineError, 'requires review'):
                 run_repack(args)
             review.unlink()
-            depth = next((droid / 'images').rglob('*.png'))
-            depth.write_bytes(b'changed after full check')
-            with self.assertRaisesRegex(RefineError, 'Training files changed'):
+            # Repack consumes validated inputs directly, without another full scan.
+            with patch('recam_refine.steps.media_path', side_effect=AssertionError('Unexpected full scan')):
                 run_repack(args)
-            self.assertFalse(list((droid / 'images').rglob('*.tar')))
-            self.assertFalse((args.work_dir / SUCCESS).exists())
+            self.assertTrue((args.work_dir / SUCCESS).exists())
 
     def test_streaming_large_pngs_and_complete_archive_digest(self):
         with tempfile.TemporaryDirectory() as td:
