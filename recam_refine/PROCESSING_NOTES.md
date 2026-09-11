@@ -11,7 +11,7 @@ valid. Stop processes using the shared checkout before updating it.
 | Unpack | Enumerate only requested chunks and extract TARs concurrently by camera directory. No transfer-receipt reads, PNG decoding, content hashing, disk-space estimate, or unpack locks. |
 | Align | Read padding evidence, trim synchronized modalities, and update metadata/statistics. Preserve recovery records. |
 | Shard plan | Assign episodes and prepare robot assets. New plans do not read depth PNGs or Parquet solely to hash them. |
-| GPU workers | Read inputs needed for fitting, optimize and evaluate cameras, save results/checkpoints. Legacy input hashes remain supported; checkpoint fingerprints use inputs already loaded for fitting. |
+| GPU workers | Read inputs needed for fitting, optimize and evaluate cameras, save results/checkpoints. Legacy input-hash fields are ignored. Checkpoints compare camera/frame/optimizer settings directly, without hashing PNGs, Parquet or robot points. Older checkpoint states are retained. |
 | Merge/apply | Confirm shard coverage, combine accepted results, and update camera parameters. |
 | Check | Decode media and check frame counts, metadata, statistics and geometry. No separate all-training-file fingerprint passes before/after this check. |
 | Cleanup/repack | Require successful preceding stages; no additional all-training-file fingerprint scan. Retain simulation TARs and training PNGs when repacking DROID depth. |
@@ -27,5 +27,5 @@ now trust the successful check, rather than scanning all files again to detect
 out-of-band changes. Checks that protect episode alignment, wrong shard results,
 archive path traversal and incomplete writes remain. Existing source-copy cleanup
 still compares data before deleting source files; this is a destructive action,
-not an extra preflight. Package download integrity checks and small plan/result
+not an extra preflight. Shard code compatibility uses algorithm/schema versions rather than whole source-file hashes. Package download integrity checks and small plan/result
 identity hashes also remain.

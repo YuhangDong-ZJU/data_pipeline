@@ -35,10 +35,7 @@ def digest(value):
 
 
 def protocol():
-    directory = Path(__file__).parent
-    return dict(schema=SCHEMA,pointworld_commit=POINTWORLD_COMMIT,backend_version=BATCHED_BACKEND_VERSION,
-                code_sha256={name:sha256(directory/name) for name in
-                             ('batched.py','calibration.py','pointworld.py','common.py','pipeline.py','steps.py','shards.py')})
+    return dict(schema=SCHEMA,pointworld_commit=POINTWORLD_COMMIT,backend_version=BATCHED_BACKEND_VERSION)
 
 
 def sampled_frames(job):
@@ -76,17 +73,21 @@ def plan_shards(root,work,args):
         require(not (work/MARKERS['refine']).exists(),'Refinement already completed; no shard plan is needed')
         require(args.num_shards is not None and args.num_shards>0,'Set --num-shards to a positive integer')
         settings = dict(num_shards=args.num_shards,iterations=args.iterations,backend=select_backend(args),protocol=protocol())
-        freeze_settings(work,'shard-plan',settings)
         if (work/READY).exists():
             plan = load_plan(root,work)
+            require(all(plan['settings'][k]==settings[k] for k in ('num_shards','iterations','backend')), 'Shard settings changed')
             print(f'SHARD PLAN already complete: {plan["pending_episodes"]} episodes / {len(plan["shards"])} shards',flush=True)
             return
+        previous_settings = work/'step_settings/shard-plan.json'
+        if previous_settings.exists():
+            old = read_json(previous_settings)
+            require(all(old[k]==settings[k] for k in ('num_shards','iterations','backend')) and
+                    all(old['protocol'].get(k)==v for k,v in protocol().items()), 'Shard settings changed')
+        else:
+            freeze_settings(work,'shard-plan',settings)
         require(not list((work/'cameras').glob('*.json')),'Unmerged candidates already exist in coordinator/cameras')
         entries,camera_dir = camera_inputs(root,work,args)
         jobs,info = read_json(work/'plan.json'),read_json(work/'training_info.json')
-        freeze_settings(work,'shard-inputs',dict(plan_sha256=sha256(work/'plan.json'),info_sha256=sha256(work/'training_info.json'),
-            camera_files={j['source']['source_episode_id']:sha256(camera_dir/(j['source']['source_episode_id']+'_cameras.json'))
-                          for j,_,_ in entries if (camera_dir/(j['source']['source_episode_id']+'_cameras.json')).exists()}))
         released,pending = {},[]
         for job,poses,status in entries:
             if poses is not None:
@@ -124,7 +125,8 @@ def load_plan(root,work,check_dataset=True):
     require(ready['complete'] and ready['plan_sha256']==sha256(work/PLAN),'Shared plan changed')
     require(plan['schema']==SCHEMA and plan['plan_id']==ready['plan_id']==digest({k:v for k,v in plan.items() if k!='plan_id'}),
             'Invalid shard plan identity')
-    require(plan['settings']['protocol']==protocol(),'Worker code differs from shard-plan; update all machines to the same commit')
+    require(all(plan['settings']['protocol'].get(k)==v for k,v in protocol().items()),
+            'Worker algorithm/schema differs from shard-plan')
     if check_dataset:
         for relative,h in plan['dataset_sha256'].items():
             require(sha256(safe_path(root/'real_world/droid',relative))==h,f'Dataset metadata changed: {relative}')
@@ -211,15 +213,6 @@ def validate_candidate(value,job,plan,part,require_provenance=True):
             require(metric.get('backend')==BATCHED_BACKEND_VERSION,'Candidate backend differs')
 
 
-def verify_inputs(root,info,jobs):
-    jobs = [job for job in jobs if job.get('calibration_inputs')]
-    for n,job in enumerate(tracked(jobs,'校验旧分片输入：episode'),1):
-        require(input_hashes(root/'real_world/droid',info,job)==job['calibration_inputs'],
-                f'Calibration input bytes changed: episode {job["episode_index"]}')
-        if n%100==0 or n==len(jobs):
-            print(f'Verify shard inputs {n}/{len(jobs)}',flush=True)
-
-
 def read_results(work,plan,part):
     directory = work/f'shards/results/shard-{part["shard_id"]:05d}'
     require((directory/'COMPLETE.json').exists(),f'Shard {part["shard_id"]} is incomplete; run/resume that shard')
@@ -289,10 +282,6 @@ def refine_shard(root,work,args):
                     cached.append(job)
                 else:
                     pending.append((job,output))
-            # New fits hash the exact bytes they consume in the data loader,
-            # overlapping reads with GPU work. Only cached results need a
-            # separate input pass here; merge rechecks every shard centrally.
-            verify_inputs(root,info,cached)
             context['cached_episodes'] = len(jobs)-len(pending)
             if pending:
                 run_calibrations(root/'real_world/droid',info,pending,work/'pointworld'/URDF_RELATIVE,local,args,backend)
@@ -337,7 +326,6 @@ def merge_shards(root,work,args):
         for part in plan['shards']:
             incoming = read_results(work,plan,part)
             require(not set(results)&set(incoming),'Duplicate episode across shard results')
-            verify_inputs(root,info,part_jobs(work,part))
             results.update(incoming)
         require(set(results)==set(plan['episodes']),'Merged episode coverage is incomplete or contains extra episodes')
         expected = {f'episode_{i:06d}.json':v for i,v in results.items()}

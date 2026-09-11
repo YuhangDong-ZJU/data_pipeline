@@ -9,7 +9,6 @@ from .progress import phase
 from collections import defaultdict, deque
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, wait, FIRST_COMPLETED
 import gc
-import hashlib
 import io
 import json
 from multiprocessing import get_context
@@ -121,34 +120,27 @@ def prepare_tasks(tasks):
                         np.all((gripper >= 0)&(gripper <= 1)),f'Invalid robot configuration: {i}')
                 frames = np.unique(np.linspace(0,job['length']-1,min(16,job['length']),dtype=int)).tolist()
                 points = [w['robot'].points(joints[t],gripper[t]) for t in frames]
-                episodes[i] = (hashlib.sha256(raw).hexdigest(), frames, points)
-            parquet_hash,frames,points = episodes[i]
-            expected = job.get('calibration_inputs')
-            if expected:
-                require(expected['frames']==frames and expected['parquet_sha256']==parquet_hash,
-                        f'Shard Parquet/frame inputs changed: episode {i}')
+                episodes[i] = (frames, points)
+            frames,points = episodes[i]
             k = np.asarray(job['initial_intrinsics'][cam],dtype=np.float64).copy()
             record = job['depths'][str(cam)]['record']
             if record:
                 k = np.asarray(record['intrinsic'],dtype=np.float64).copy()
             k[:2] *= .5
-            depths,hashes = [],[]
+            depths = []
             for t in frames:
                 raw = media_path(w['root'],w['info'],i,f'observation.images.depth_{cam:02d}',t).read_bytes()
-                hashes.append(hashlib.sha256(raw).hexdigest())
                 with Image.open(io.BytesIO(raw)) as im:
                     depths.append(np.asarray(im,dtype=np.float32)[::2,::2]/1000.)
-            if expected:
-                require(expected['depth_sha256'][str(cam)]==hashes,f'Shard depth inputs changed: episode {i} camera {cam}')
             data = dict(initial=np.asarray(job['initial_extrinsics'][cam]), k=k, depths=depths, points=points)
-            identity = dict(backend=BACKEND_VERSION, iterations=w['iterations'], pointworld_commit=POINTWORLD_COMMIT,
-                            episode=i, source=job['source'], camera=cam, frames=frames, parquet=parquet_hash,
-                            png=hashes, initial=data['initial'].tolist(), intrinsic=k.tolist(),
-                            points=[hashlib.sha256(p.tobytes()).hexdigest() for p in points])
-            fingerprint = hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
+            fingerprint = dict(backend=BACKEND_VERSION, iterations=w['iterations'], pointworld_commit=POINTWORLD_COMMIT,
+                               episode=i, source=job['source'], camera=cam, frames=frames,
+                               initial=data['initial'].tolist(), intrinsic=k.tolist())
             saved = load_state(state_path(w['work'],task))
             if saved:
-                require(saved['fingerprint'] == fingerprint, f'Checkpoint inputs changed: episode {i} camera {cam}')
+                # Old checkpoints stored a payload digest; retain their optimizer state.
+                if isinstance(saved.get('fingerprint'), dict):
+                    require(saved['fingerprint'] == fingerprint, f'Checkpoint inputs changed: episode {i} camera {cam}')
                 require(saved['state']['iteration'] == task['iteration'], 'Checkpoint changed during scheduling')
             else:
                 require(task['iteration'] == 0, 'Missing optimizer checkpoint')

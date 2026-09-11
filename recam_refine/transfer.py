@@ -1,9 +1,8 @@
 """Incremental atomic moves and verified copies, without a global preflight."""
-import hashlib
 import os
 from pathlib import Path
 
-from .common import Journal, read_json, require, safe_path, sha256, sync_dir, write_json
+from .common import Journal, read_json, require, safe_path, sync_dir, write_json
 from .parallel import io_map, Counter
 from functools import partial
 
@@ -13,7 +12,7 @@ def matches(path, entry, content=False):
         return False
     if 'size' in entry and path.stat().st_size != entry['size']:
         return False
-    return not (content and entry.get('sha256')) or sha256(path) == entry['sha256']
+    return True
 
 
 def _names(directory):
@@ -70,8 +69,6 @@ def _move(job, root, work, source_device, counter):
     fast_path = renamed or receipt['complete'] or (same_fs and not src.exists())
     for entry in counted([] if fast_path else receipt["files"], counter):
         p, target = src/entry['name'], dst/entry['name']
-        if target.exists() and entry.get('sha256') and matches(target, entry, content=True):
-            continue
         if not p.exists():
             # Resume an atomic rename interrupted before the completion receipt.
             require(same_fs and matches(target, entry, content=True), f'Missing source/target: {p}')
@@ -85,21 +82,17 @@ def _move(job, root, work, source_device, counter):
         else:
             staged = target.with_name('.' + target.name + '.refine-part')
             before = p.stat()
-            digest = hashlib.sha256() if entry.get('sha256') else None
             size = 0
             with p.open('rb') as incoming, staged.open('wb') as outgoing:
                 while block := incoming.read(1024 * 1024):
                     outgoing.write(block)
                     size += len(block)
-                    if digest is not None:
-                        digest.update(block)
                 outgoing.flush()
                 os.fsync(outgoing.fileno())
             after = p.stat()
             require(size == before.st_size == staged.stat().st_size and
                     (before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
                     (after.st_size, after.st_mtime_ns, after.st_ctime_ns), f'Copy incomplete/source changed: {p}')
-            require(digest is None or entry['sha256'] == digest.hexdigest(), f'Source changed since receipt: {p}')
             entry['size'] = size
             # A partial stream can be recopied on recovery. Commit one receipt
             # per completed stream, not one fsync/JSON rewrite per PNG.

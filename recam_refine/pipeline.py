@@ -148,20 +148,11 @@ def calibrate_one(args):
     if output.exists():
         return read_json(output)
     i = job["episode_index"]
-    expected = job.get('calibration_inputs')
-    if expected:
-        import hashlib
-        import io
-        raw = parquet_path(root,info,i).read_bytes()
-        require(hashlib.sha256(raw).hexdigest()==expected['parquet_sha256'],f'Shard Parquet changed: episode {i}')
-        table = pq.read_table(io.BytesIO(raw)).slice(0,job['length'])
-    else:
-        table = pq.read_table(parquet_path(root, info, i)).slice(0, job["length"])
+    table = pq.read_table(parquet_path(root, info, i)).slice(0, job["length"])
     joints = values(table["observation.states.joint_state"])
     gripper = values(table["observation.states.gripper_state"]).ravel()
     require(np.isfinite(joints).all() and np.isfinite(gripper).all() and np.all((gripper >= 0) & (gripper <= 1)), f"Invalid robot configuration: {i}")
     indices = np.unique(np.linspace(0, job["length"] - 1, min(16, job["length"]), dtype=int))
-    require(not expected or expected['frames']==indices.tolist(),'Shard frame selection changed')
     robot = calibration_robot(urdf)
     points = [robot.points(joints[t], gripper[t]) for t in indices]
     poses, metrics = [], []
@@ -174,11 +165,6 @@ def calibrate_one(args):
         depths = []
         for index,t in enumerate(indices):
             path = media_path(root, info, i, f"observation.images.depth_{cam:02d}", int(t))
-            if expected:
-                raw = path.read_bytes()
-                require(hashlib.sha256(raw).hexdigest()==expected['depth_sha256'][str(cam)][index],
-                        f'Shard depth changed: episode {i} camera {cam} frame {t}')
-                path = io.BytesIO(raw)
             with Image.open(path) as im:
                 # Preserve pixel centers using explicit nearest decimation.
                 depths.append(np.asarray(im, dtype=np.float32)[::2, ::2] / 1000.)

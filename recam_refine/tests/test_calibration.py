@@ -163,6 +163,9 @@ class SchedulerTests(unittest.TestCase):
                 self.assertNotIn('error',prepared)
                 c.save_state(c.state_path(worker['work'],task),dict(fingerprint=prepared['fingerprint'],state={'iteration':0}))
                 self.assertNotIn('error',c.prepare_tasks([task])[0])
+                c.save_state(c.state_path(worker['work'],task),dict(fingerprint='legacy-payload-hash',state={'iteration':0}))
+                self.assertNotIn('error',c.prepare_tasks([task])[0])
+                c.save_state(c.state_path(worker['work'],task),dict(fingerprint=prepared['fingerprint'],state={'iteration':0}))
                 task['job']['initial_extrinsics'][1][0][3] = .001
                 self.assertIn('Checkpoint inputs changed',c.prepare_tasks([task])[0]['error'])
 

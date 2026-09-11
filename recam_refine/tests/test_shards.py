@@ -161,14 +161,27 @@ class ShardTests(unittest.TestCase):
             with self.assertRaises(RefineError):
                 load_plan(args.root,args.work_dir)
 
-    def test_reference_worker_checks_planned_input_bytes_before_fitting(self):
+    def test_legacy_code_hash_does_not_invalidate_completed_plan(self):
+        from recam_refine.shards import digest
+        with tempfile.TemporaryDirectory() as td:
+            args,_,_ = fixture(Path(td))
+            plan = read_json(args.work_dir/PLAN)
+            plan['settings']['protocol']['code_sha256'] = {'steps.py':'old-code'}
+            plan['plan_id'] = digest({k:v for k,v in plan.items() if k!='plan_id'})
+            write_json(args.work_dir/PLAN,plan)
+            write_json(args.work_dir/READY,dict(complete=True,plan_id=plan['plan_id'],plan_sha256=sha256(args.work_dir/PLAN)))
+            with patch('recam_refine.shards.input_hashes',side_effect=AssertionError('Unexpected data read')):
+                plan_shards(args.root,args.work_dir,args)
+            self.assertEqual(load_plan(args.root,args.work_dir)['plan_id'],plan['plan_id'])
+
+    def test_reference_worker_ignores_legacy_payload_hash(self):
         from recam_refine.pipeline import calibrate_one
         with tempfile.TemporaryDirectory() as td:
             args,droid,_ = fixture(Path(td))
             plan = load_plan(args.root,args.work_dir)
             job = part_jobs(args.work_dir,plan['shards'][0])[0]
             job['calibration_inputs'] = dict(parquet_sha256='wrong')
-            with self.assertRaisesRegex(RefineError,'Shard Parquet changed'):
+            with patch('recam_refine.pipeline.calibration_robot', side_effect=RuntimeError('Reached fitting inputs')), self.assertRaisesRegex(RuntimeError,'Reached fitting inputs'):
                 calibrate_one((droid,read_json(args.work_dir/'training_info.json'),job,Path(td)/'candidate.json',
                                args.work_dir/'pointworld'/URDF_RELATIVE,'cpu',1))
 
