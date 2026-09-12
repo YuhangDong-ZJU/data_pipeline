@@ -4,29 +4,41 @@ import json
 import os
 from pathlib import Path
 import platform
+import socket
 import sys
+import traceback
+from collections import Counter
+
+import av
+import numpy as np
+import pyarrow
+from PIL import Image
+import torch
+
+from .audit import run_audit
+from .batched import CameraBatch
+from .common import require, read_jsonl, write_json
+from .fusion import run_fusion
+from .pipeline import discover, run
+from .pointworld import release_pose
+from .repack import run_repack
+from .steps import run_step, transfer_only
+from .validate import check_subset
+from .viewer_bundle import prepare_viewer
 
 
 def doctor(gpu=False,torch_cpu=False):
-    import av
-    import numpy as np
-    import pyarrow
-    from PIL import Image
-    from .common import require
     require(sys.version_info[:2] in ((3, 10), (3, 11)), "Use Python 3.10 or 3.11")
     av.codec.Codec("libx264", "w")
     result = dict(python=platform.python_version(), platform=platform.platform(),
                   av=av.__version__, pyarrow=pyarrow.__version__, numpy=np.__version__, pillow=Image.__version__)
     if torch_cpu:
-        import torch
         d = torch.ones((1,1,8,8),device='cpu')
         g = torch.zeros((1,1,4,2),device='cpu',requires_grad=True)
         torch.nn.functional.grid_sample(d,g,align_corners=True).sum().backward()
         require(g.grad is not None and bool(torch.isfinite(g.grad).all()),'CPU grid_sample check failed')
         result.update(torch=torch.__version__,torch_cpu_check=True)
     if gpu:
-        import torch
-        from .batched import CameraBatch
         require(torch.cuda.is_available(), "No CUDA GPU accessible; check NVIDIA driver and CUDA_VISIBLE_DEVICES")
         devices = []
         graphs = []
@@ -158,30 +170,20 @@ def main():
         if args.command == "doctor":
             doctor(args.gpu,args.torch_cpu)
         elif args.command == "run":
-            from .pipeline import run
             run(args)
         elif args.command == 'transfer-depth':
-            from .steps import transfer_only
             transfer_only(args)
         elif args.command == 'run-step':
             if args.step == 'repack':
-                from .repack import run_repack
                 run_repack(args)
             else:
-                from .steps import run_step
                 run_step(args)
         elif args.command == "check":
-            from .pipeline import discover
-            from .validate import check_subset
-            from .common import require, write_json
             require(not args.report_dir.resolve().is_relative_to(args.root.resolve()), "Report directory must be outside the dataset")
             (args.report_dir / "SUCCESS.json").unlink(missing_ok=True)
             results = [check_subset(s, args.report_dir, args.workers, droid=s.name == "droid") for s in discover(args.root)]
             write_json(args.report_dir / "SUCCESS.json", results)
         elif args.command == "overlap":
-            from collections import Counter
-            from .common import read_jsonl, write_json
-            from .pointworld import release_pose
             rows = read_jsonl(args.episode_manifest)
             counts, details = Counter(), []
             for row in rows:
@@ -193,23 +195,17 @@ def main():
             write_json(args.report, dict(counts=dict(counts), episodes=details))
             print(json.dumps(dict(counts)))
         elif args.command == "audit-cameras":
-            from .audit import run_audit
             return run_audit(args)
         elif args.command == "visualize-fusion":
-            from .fusion import run_fusion
             run_fusion(args)
         elif args.command == "prepare-viewer":
-            from .viewer_bundle import prepare_viewer
             prepare_viewer(args)
     except Exception as exc:
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         if args.command in ('run','transfer-depth','run-step') and not args.work_dir.resolve().is_relative_to(args.root.resolve()):
-            import traceback
-            from .common import write_json
             name = ('FAILED.json' if args.command=='run' else 'STEP1_FAILED.json' if args.command=='transfer-depth'
                     else args.step.upper()+'_FAILED.json')
             if args.command == 'run-step' and args.step == 'unpack':
-                import os, socket
                 name = f'unpack_workers/{socket.gethostname()}-{os.getpid()}/UNPACK_FAILED.json'
             write_json(args.work_dir / name,
                        dict(error=str(exc), traceback=traceback.format_exc()))
