@@ -165,9 +165,8 @@ def calibrate_one(args):
         depths = []
         for index,t in enumerate(indices):
             path = media_path(root, info, i, f"observation.images.depth_{cam:02d}", int(t))
-            with Image.open(path) as im:
-                # Preserve pixel centers using explicit nearest decimation.
-                depths.append(np.asarray(im, dtype=np.float32)[::2, ::2] / 1000.)
+            from .bad_depth import read_depth
+            depths.append(read_depth(path))
         try:
             pose, metric = refine_camera_with_retry(np.asarray(job["initial_extrinsics"][cam]), k, depths, points,
                                                     device=device, iterations=iterations)
@@ -210,6 +209,8 @@ def apply_episode(args):
     raw = saved.read_bytes()
     require(hashlib.sha256(raw).hexdigest() == job["original_parquet_sha256"], f"Original Parquet identity changed: {path}")
     table = pq.read_table(io.BytesIO(raw)).slice(0, n)
+    if 'output_episode_index' in job:
+        table = set_values(table, 'episode_index', np.full(n, job['output_episode_index']))
     unchanged = preserved_hashes(table)
     wrist_hash = array_hash(values(table["observation.camera.extrinsics"])[:, 0])
     table = set_values(table, "index", np.arange(offset, offset + n))
@@ -281,7 +282,8 @@ def update_metadata(root, droid, info, jobs, stats, work, camera_directory=None,
     provenance = []
     stat_by_id = {s["episode_index"]:s for s in stats}
     for job in jobs:
-        camera = read_json((camera_directory or work / "cameras") / f"episode_{job['episode_index']:06d}.json")
+        camera = read_json(Path(job['candidate_path']) if job.get('candidate_path') else
+                           (camera_directory or work / "cameras") / f"episode_{job['episode_index']:06d}.json")
         provenance.append(dict(episode_index=job["episode_index"], source_episode_id=job["source"]["source_episode_id"],
                                camera_serials=job["source"]["camera_serials"], length=job["length"],
                                original_length=job["original_length"], retained_source_frame_range=[0, job["length"]],
@@ -340,8 +342,16 @@ def finalize(root, droid, subsets, work):
     # Discard redundant source copies only after verifying the retained prefix
     # against the final dataset and saving trimmed source frames for recovery.
     if (work / "depth_transfer.json").exists():
+        records = read_json(work / 'depth_transfer.json')
+        exclusion = work/'bad_depth_exclusion/SUCCESS.json'
+        if exclusion.exists():
+            saved = read_json(exclusion)
+            affected = set(saved['excluded_episodes']) | {int(i) for i in saved['renumbered']} | set(saved['renumbered'].values())
+            # Original converted depths stay outside the dataset. Do not compare
+            # an old target ID with a different episode after tail-hole filling.
+            records = [r for r in records if not any(f'episode_{i:06d}' in Path(r['target']).parts for i in affected)]
         io_map(partial(_cleanup_source, work=work),
-               read_json(work / 'depth_transfer.json'), 8, '清理源副本（相机序列）')
+               records, 8, '清理源副本（相机序列）')
     # Retire obsolete wrist depth/normal and old plural normal annotations.
     for folder in ("images", "videos"):
         for chunk in (droid / folder).glob("chunk-*"):

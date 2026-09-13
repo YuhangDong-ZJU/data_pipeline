@@ -129,9 +129,8 @@ def prepare_tasks(tasks):
             k[:2] *= .5
             depths = []
             for t in frames:
-                raw = media_path(w['root'],w['info'],i,f'observation.images.depth_{cam:02d}',t).read_bytes()
-                with Image.open(io.BytesIO(raw)) as im:
-                    depths.append(np.asarray(im,dtype=np.float32)[::2,::2]/1000.)
+                from .bad_depth import read_depth
+                depths.append(read_depth(media_path(w['root'],w['info'],i,f'observation.images.depth_{cam:02d}',t)))
             data = dict(initial=np.asarray(job['initial_extrinsics'][cam]), k=k, depths=depths, points=points)
             fingerprint = dict(backend=BACKEND_VERSION, iterations=w['iterations'], pointworld_commit=POINTWORLD_COMMIT,
                                episode=i, source=job['source'], camera=cam, frames=frames,
@@ -146,7 +145,8 @@ def prepare_tasks(tasks):
                 require(task['iteration'] == 0, 'Missing optimizer checkpoint')
             prepared.append(dict(task=task, data=data, frames=frames, fingerprint=fingerprint, saved=saved))
         except Exception as exc:
-            prepared.append(dict(task=task,error=str(exc)))
+            from .bad_depth import BadDepthImage
+            prepared.append(dict(task=task,error=str(exc),bad_depth=isinstance(exc,BadDepthImage)))
     return prepared
 
 
@@ -245,7 +245,7 @@ def process_batch(tasks, next_tasks):
     output,groups = [],defaultdict(list)
     for item in prepared:
         if 'error' in item:
-            output.append(dict(task=item['task'],error=item['error']))
+            output.append(dict(task=item['task'],error=item['error'],bad_depth=item.get('bad_depth',False)))
         elif item['saved'] and 'result' in item['saved']:
             output.append(dict(task=item['task'],**item['saved']['result']))
         else:
@@ -293,7 +293,8 @@ def _run_reference(root, info, pending, urdf, devices, iterations,args=None):
                 try:
                     future.result()
                 except Exception as exc:
-                    errors.append(dict(episode_index=i,error=str(exc)))
+                    from .bad_depth import BadDepthImage
+                    errors.append(dict(episode_index=i,error=str(exc),bad_depth=isinstance(exc,BadDepthImage)))
                 completed += 1
                 print(f'Calibrate {completed}/{len(pending)}',flush=True)
                 progress(args,completed,len(pending),errors,start)
@@ -317,7 +318,17 @@ def run_calibrations(root, info, pending, urdf, work, args, backend):
     else:
         errors = _run_batched(root,info,pending,urdf,work,args,devices)
     write_json(Path(work)/'calibration_failures.json',errors)
-    require(not errors,'Calibration jobs failed; inspect calibration_failures.json and rerun this step')
+    from .bad_depth import excluded_candidate
+    bad = [e for e in errors if e.get('bad_depth')]
+    fatal = [e for e in errors if not e.get('bad_depth')]
+    for job,path in pending:
+        failures = [e for e in bad if e['episode_index']==job['episode_index']]
+        if failures and not any(e['episode_index']==job['episode_index'] for e in fatal):
+            write_json(path,excluded_candidate(job,failures))
+            print(f"SKIPPED bad depth episode={job['episode_index']}: {failures}",flush=True)
+    require(not fatal,'Calibration jobs failed; inspect calibration_failures.json and rerun this step')
+    phase('优化外参：episode',len(pending),len(pending),
+          f"excluded={len({e['episode_index'] for e in bad})}; errors=0")
 
 
 def _run_batched(root, info, pending, urdf, work, args, devices):
@@ -377,7 +388,7 @@ def _run_batched(root, info, pending, urdf, work, args, devices):
                         task = result['task']
                         i,cam = task['job']['episode_index'],task['cam']
                         if 'error' in result:
-                            errors.append(dict(episode_index=i,camera=cam,error=result['error']))
+                            errors.append(dict(episode_index=i,camera=cam,error=result['error'],bad_depth=result.get('bad_depth',False)))
                         elif result['retry']:
                             task['iteration'] = 2000
                             queues[2000].append(task)

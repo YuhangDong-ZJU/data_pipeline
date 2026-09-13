@@ -37,3 +37,25 @@ archive path traversal and incomplete writes remain. Existing source-copy cleanu
 still compares data before deleting source files; this is a destructive action,
 not an extra preflight. Shard code compatibility uses algorithm/schema versions rather than whole source-file hashes. Package download integrity checks and small plan/result
 identity hashes also remain.
+
+Bad depth images during calibration: retry decoding the same file once. If it
+still cannot decode, record the filename and exclude that episode; other I/O,
+CUDA and programming failures still fail the step. Fit rejection retains the
+initial camera pose and does not exclude an episode. The fixed shard plan and
+completed results remain reusable, including old results. Run GPU1 for shard 0
+and GPU2 for shard 1, once per shard at a time.
+
+The existing CPU `apply` step collects exclusions after both shards complete.
+It moves excluded training episode entries to
+`$RECAM_WORK/bad_depth_exclusion/episodes`, fills holes from surviving tail
+episodes, and updates indices during the normal Parquet write pass. Metadata,
+statistics, source identities and audit inputs follow the final mapping. GPU
+plans/results remain unchanged. No extra PNG scan, content hash, or file lock
+is added. Interrupted moves and apply results resume from their receipts.
+Original converted depth copies for excluded/renumbered episodes are retained
+outside the dataset. Obsolete DROID TARs are removed during the existing cleanup
+step and the final TARs are generated from the retained episodes as usual.
+
+After pulling this version, rerun the failed `run_gpu1.sh`/`run_gpu2.sh` launchers;
+completed episodes are skipped. When both finish, run `run_cpu_finish.sh`.
+Preparation does not need to be repeated just for this update.

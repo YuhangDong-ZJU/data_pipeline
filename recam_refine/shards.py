@@ -1,7 +1,7 @@
 """Read-only multi-host calibration over a shared dataset and coordinator.
 
-Each worker has a separate runtime/checkpoint directory. Shared read locks
-exclude dataset writers; a per-shard exclusive lock excludes duplicate workers.
+Each worker has a separate checkpoint directory and a fixed disjoint shard.
+Run each shard once at a time; completed candidates are reused on restart.
 Only merge publishes the normal refinement completion marker.
 """
 from __future__ import annotations
@@ -167,6 +167,11 @@ def validate_candidate(value,job,plan,part,require_provenance=True):
             'Candidate optimization source differs')
     if require_provenance:
         require(value.get('shard_provenance')==provenance(plan,part,job),'Candidate belongs to different shard/plan/input')
+    if value.get('excluded_bad_depth'):
+        require(bool(value.get('failures')) and all(e.get('bad_depth') is True and
+                e['episode_index']==job['episode_index'] for e in value['failures']),
+                'Missing confirmed bad-depth evidence')
+        return
     poses = check_transform(value['camera_to_base'],'shard candidate')
     require(poses.shape==(2,4,4) and len(value['metrics'])==2,'Candidate must contain both external cameras')
     require(value['sample_frame_indices']==sampled_frames(job),'Candidate sampling frames changed')

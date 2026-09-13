@@ -263,15 +263,19 @@ def refine_only(root,work,args):
 
 
 def refinement_result(work,jobs):
-    retained = []
+    retained,excluded = [],[]
     for job in tracked(jobs,'相机参数：episode'):
         camera = read_json(work/'cameras'/f'episode_{job["episode_index"]:06d}.json')
+        if camera.get('excluded_bad_depth'):
+            excluded.append(camera)
+            continue
         for cam,metric in enumerate(camera.get('metrics',[]),1):
             if metric.get('accepted') is False:
                 retained.append(dict(episode_index=job['episode_index'],camera=cam,**metric))
     write_json(work/'retained_official_calibrations.json',retained)
-    return dict(episodes=len(jobs),pointworld=read_json(work/'pointworld_overlap.json'),retained_official_cameras=len(retained),
-                all_external_calibrations_accepted=not retained,
+    write_json(work/'excluded_bad_depth.json',excluded)
+    return dict(episodes=len(jobs),excluded_bad_depth_episodes=len(excluded),pointworld=read_json(work/'pointworld_overlap.json'),retained_official_cameras=len(retained),
+                all_external_calibrations_accepted=not retained and not excluded,
                 candidate_sha256={p.name:sha256(p) for p in sorted((work/'cameras').glob('episode_*.json'))})
 
 
@@ -282,6 +286,10 @@ def apply_only(root,work,args):
     candidates = read_json(work/MARKERS['refine'])['candidate_sha256']
     require({p.name:sha256(p) for p in sorted((work/'cameras').glob('episode_*.json'))}==candidates,
             'Candidates changed after refinement; refusing to apply unverified replacements')
+    from .quarantine import apply_filtered
+    excluded = read_json(work/'excluded_bad_depth.json') if (work/'excluded_bad_depth.json').exists() else []
+    if excluded:
+        return apply_filtered(root,work,args,jobs,info,excluded)
     tasks,offset = [],0
     for job in tracked(jobs,'相机参数：episode'):
         camera = read_json(work/'cameras'/f'episode_{job["episode_index"]:06d}.json')

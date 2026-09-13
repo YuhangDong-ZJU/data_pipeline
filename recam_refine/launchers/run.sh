@@ -159,7 +159,7 @@ else
   if [[ "$DRY_RUN" == 0 ]]; then
     case "$GROUP" in
       gpu1|gpu2) SHARED_PYTHON="$("${STATE[@]}" ready-compatible)" ;;
-      *) SHARED_PYTHON="$("${STATE[@]}" ready)" ;;
+      *) SHARED_PYTHON="$("${STATE[@]}" ready-compatible)" ;;
     esac
   fi
   unset RECAM_REFINE_ENV_NAME

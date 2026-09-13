@@ -379,7 +379,9 @@ def _run_audit_locked(args):
     require(getattr(args, "image_frames", 3) >= 0 and getattr(args, "workers", 1) > 0, "image-frames must be nonnegative and workers positive")
     os.environ.setdefault("MPLCONFIGDIR", str(out / ".matplotlib"))
     info = read_json(root / "meta/info.json")
-    plan = {r["episode_index"]:r for r in read_json(work / "plan.json")} if (work / "plan.json").exists() else {}
+    final_area = work/'bad_depth_exclusion'
+    input_area = final_area if (final_area/'SUCCESS.json').exists() else work
+    plan = {r["episode_index"]:r for r in read_json(input_area / "plan.json")} if (input_area / "plan.json").exists() else {}
     require(plan or not (root / "meta/refinement.jsonl").exists(),
             "This dataset is already refined; supply its original work directory to recover the true initial poses")
     manifest_path = args.episode_manifest or work / "inputs/episode_manifest.jsonl"
@@ -411,7 +413,9 @@ def _run_audit_locked(args):
     for key, record_value in records.items():
         grouped.setdefault(key[0], {})[key] = record_value
     tasks = [(root, info, rows[i], plan.get(i), grouped.get(i, {}),
-              camera_dir, candidate_dir, args, out / f"episode_{i:06d}") for i in ids]
+              camera_dir, (Path(plan[i]['candidate_path']).parent if not args.candidate_dir and
+                           plan.get(i,{}).get('candidate_path') else candidate_dir),
+              args, out / f"episode_{i:06d}") for i in ids]
     phase('几何校验：episode',0,len(tasks))
     def record(i, report=None, error=None):
         if error is not None:
