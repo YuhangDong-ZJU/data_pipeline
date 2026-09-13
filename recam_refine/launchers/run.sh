@@ -11,9 +11,17 @@ if [[ -n "${RECAM_UPDATED_LOCK:-}" ]]; then
 fi
 case "$GROUP" in prepare|gpu1|gpu2|finish) ;; *) echo 'Invalid machine stage' >&2; exit 2 ;; esac
 DRY_RUN=0
+if [[ "${1:-}" == --shard-id ]]; then
+  expected=0; [[ "$GROUP" != gpu2 ]] || expected=1
+  [[ "$GROUP" == gpu1 || "$GROUP" == gpu2 ]] && [[ "${2:-}" == "$expected" ]] || {
+    echo "ERROR: $GROUP requires --shard-id $expected (gpu1=0, gpu2=1)." >&2; exit 2;
+  }
+  shift 2
+fi
 case "${1:-}" in
   --help|-h)
     echo 'Usage: bash run_prepare.sh | run_gpu1.sh | run_gpu2.sh | run_cpu_finish.sh [--dry-run]'
+    echo 'Explicit shards: bash run_gpu1.sh --shard-id 0; bash run_gpu2.sh --shard-id 1'
     echo 'Order: CPU prepare -> GPU1 + GPU2 in parallel -> CPU finish. Failed groups resume on rerun.'
     echo 'Shared paths/defaults: recam_refine/launchers/config.sh; environment overrides are supported.'
     exit 0 ;;
