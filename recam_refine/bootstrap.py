@@ -19,20 +19,14 @@ PYTHON_VERSION = "3.11.11"
 
 @contextmanager
 def runtime_lock(root,read_only=False):
-    """Workers share a lease; an installer must have exclusive access."""
-    import fcntl
+    """Compatibility context; environment installation is scheduled on one CPU."""
     root = root.resolve()
     if read_only:
-        if not (root/'bootstrap.lock').is_file():
+        if not (root/'env/bin/python').is_file():
             raise RuntimeError('Runtime not prepared; run bootstrap on the CPU host first')
     else:
         root.mkdir(parents=True,exist_ok=True)
-    with (root/'bootstrap.lock').open('r' if read_only else 'a+') as lock:
-        try:
-            fcntl.flock(lock,(fcntl.LOCK_SH if read_only else fcntl.LOCK_EX)|fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError('Runtime is in use or being installed; finish active workers/installers before changing it') from exc
-        yield lock
+    yield None
 
 
 def runtime_env(root):
@@ -79,10 +73,7 @@ def main():
     with runtime_lock(root,args.verify_only) as lock:
         install(root,args.gpu,args.prepare_gpu,args.cpu_torch,args.verify_only)
         if args.command:
-            # Keep the lease throughout the worker, including if its launcher
-            # exits first. Another worker may read, but no installer may write.
-            result = subprocess.run([str(root/'env/bin/python'),*args.command],env=runtime_env(root),
-                                    pass_fds=(lock.fileno(),))
+            result = subprocess.run([str(root/'env/bin/python'),*args.command],env=runtime_env(root))
             raise SystemExit(result.returncode)
 
 

@@ -3,6 +3,12 @@
 set -Eeuo pipefail
 GROUP="${1:-}"
 shift || true
+if [[ -n "${RECAM_UPDATED_LOCK:-}" ]]; then
+  # Release an inherited descriptor when an older prepare script updates itself.
+  exec 9>&-
+  export RECAM_CODE_UPDATED=1
+  unset RECAM_UPDATED_LOCK
+fi
 case "$GROUP" in prepare|gpu1|gpu2|finish) ;; *) echo 'Invalid machine stage' >&2; exit 2 ;; esac
 DRY_RUN=0
 case "${1:-}" in
@@ -46,24 +52,15 @@ step() {
 }
 if [[ "$DRY_RUN" == 0 ]]; then
   "${STATE[@]}" paths
-  command -v flock >/dev/null || { echo 'ERROR: flock is required (Debian util-linux)' >&2; exit 1; }
   mkdir -p "$RECAM_WORK/launchers"
-  # Install tee before acquiring the lease, so the logger cannot retain the lock.
-  if [[ -z "${RECAM_UPDATED_LOCK:-}" ]]; then
+  # Keep one logger across the code-update restart.
+  if [[ -z "${RECAM_CODE_UPDATED:-}" ]]; then
     exec > >(tee -a "$RECAM_WORK/launchers/run_${GROUP}.log") 2>&1
   fi
-  if [[ "${RECAM_UPDATED_LOCK:-}" != "$RECAM_WORK/launchers/workflow.lock" ]]; then
-    exec 9>"$RECAM_WORK/launchers/workflow.lock"
-  else
-    [[ "$GROUP" == prepare && -e /proc/$$/fd/9 ]] || { echo 'ERROR: missing update lock'; exit 1; }
-  fi
-  case "$GROUP" in
-    gpu1|gpu2) : ;; # Fixed disjoint shards; no launcher flock on shared FUSE storage.
-    *) flock --exclusive --nonblock 9 ;;
-  esac
+
 fi
 # This function is fully parsed before Git can replace this file. The exec
-# below enters the newly pulled scripts and preserves the exclusive lease.
+# below enters the newly pulled scripts and preserves the update marker.
 update_and_restart() {
   CURRENT='update code'
   git diff --quiet && git diff --cached --quiet || {
@@ -75,11 +72,11 @@ update_and_restart() {
   git switch codex/recam-dataset-refine
   git pull --ff-only origin codex/recam-dataset-refine
   git log -1 --oneline
-  export RECAM_UPDATED_LOCK="$RECAM_WORK/launchers/workflow.lock"
+  export RECAM_CODE_UPDATED=1
   echo '[prepare] SUCCESS step=git-update；重新进入最新脚本'
   exec bash "$REPO_DIR/run_prepare.sh"
 }
-if [[ "$GROUP" == prepare && -z "${RECAM_UPDATED_LOCK:-}" ]]; then
+if [[ "$GROUP" == prepare && -z "${RECAM_CODE_UPDATED:-}" ]]; then
   if [[ "$DRY_RUN" == 1 ]]; then
     echo '+ git fetch origin codex/recam-dataset-refine'
     echo '+ git switch codex/recam-dataset-refine'
@@ -95,9 +92,9 @@ printf '[%s] RUNNING elapsed=0s\nREPO_DIR=%s\nRECAM_ROOT=%s\nRECAM_WORK=%s\n' \
 if [[ "$GROUP" == prepare ]]; then
   # A completed preparation is immutable while either GPU is running.
   if done_marker launchers/PREPARE_READY.json; then
-    # Only CPU preparation holds the exclusive update lease. Validate the old
+    # CPU updates run before GPU workers. Validate the old
     # paths/plan before accepting updated code; never discard completion records.
-    if [[ -n "${RECAM_UPDATED_LOCK:-}" ]]; then
+    if [[ -n "${RECAM_CODE_UPDATED:-}" ]]; then
       SHARED_PYTHON="$("${STATE[@]}" ready-compatible)"
       code_rc=0
       "${STATE[@]}" code-current || code_rc=$?
@@ -183,7 +180,7 @@ else
           exit "$shard_rc"
         fi
       fi
-      # Existing per-shard locks prevent duplicate workers. The GPU profile
+      # Each shard runs once. The GPU profile
       # verifies actual CUDA availability without installing or updating packages.
       run bash recam_refine/run_step.sh shard-refine "$RECAM_ROOT" "$RECAM_WORK" \
         --python "$SHARED_PYTHON" --no-install --shard-id "$shard" --worker-work-dir "$worker" \

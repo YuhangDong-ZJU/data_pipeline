@@ -75,17 +75,12 @@ class SupplementTests(unittest.TestCase):
         self.assertEqual(command[-1], '/work/pip-25.2-py3-none-any.whl')
         self.assertNotIn('install', command)
 
-    def test_shared_readers_block_additions_and_release_afterwards(self):
-        with tempfile.TemporaryDirectory() as td:
+    def test_environment_context_never_uses_file_locks(self):
+        with tempfile.TemporaryDirectory() as td, patch('fcntl.flock',side_effect=AssertionError('File lock')):
             work = Path(td)
-            with environment_lease(work, '/env'), environment_lease(work, '/env'):
-                with self.assertRaisesRegex(RuntimeError, 'in use'):
-                    with environment_lease(work, '/env', exclusive=True, timeout=0):
-                        self.fail('Installer entered while workers running')
-            with environment_lease(work, '/env', exclusive=True):
-                with self.assertRaisesRegex(RuntimeError, 'in use'):
-                    with environment_lease(work, '/env', timeout=0):
-                        self.fail('Worker entered while installing')
+            with environment_lease(work, '/env'), environment_lease(work, '/env', exclusive=True):
+                pass
+            self.assertEqual(list(work.iterdir()),[])
 
     def test_system_python_refused_before_pip_or_download(self):
         with patch('recam_refine.dependencies.pip_command', side_effect=AssertionError('Installer called')):

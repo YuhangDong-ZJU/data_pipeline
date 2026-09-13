@@ -17,52 +17,6 @@ class RefineError(RuntimeError):
     pass
 
 
-def lock_mount(path):
-    """Identify Linux mount semantics without invoking mount or changing options."""
-    table = Path('/proc/self/mountinfo')
-    if not table.exists():
-        return '',set()
-    target = Path(path).resolve()
-    matches = []
-    for line in table.read_text().splitlines():
-        left,right = line.split(' - ',1)
-        fields,details = left.split(),right.split()
-        mount = Path(re.sub(r'\\([0-7]{3})',lambda m:chr(int(m[1],8)),fields[4]))
-        if target.is_relative_to(mount):
-            matches.append((len(mount.parts),details[0],set((fields[5]+','+details[2]).split(','))))
-    return max(matches,key=lambda v:v[0])[1:] if matches else ('',set())
-
-
-def validate_lock_mount(path):
-    kind,options = lock_mount(path)
-    if kind in ('nfs','nfs4'):
-        require(not options&{'nolock','local_lock=all','local_lock=flock'},
-                'Shared NFS locking is disabled by mount options; enable server-side flock for dataset/coordinator before running')
-    require(kind not in ('fuse.sshfs','fuse.rclone','fuse.s3fs'),
-            f'{kind} does not provide the shared POSIX locking required by this workflow')
-    return kind
-
-
-def acquire_directory_lock(fd,mode):
-    """Additional dataset protection; caller MUST already hold work/run.lock.
-
-    NFS emulates flock with byte-range locks and cannot exclusively lock a
-    read-only directory. Shared coordinator locks are ordinary files opened
-    for writing, and remain authoritative on network mounts.
-    https://man7.org/linux/man-pages/man2/flock.2.html (NFS details)
-    """
-    import fcntl
-    path = Path(os.readlink(f'/proc/self/fd/{fd}'))
-    kind = validate_lock_mount(path)
-    try:
-        fcntl.flock(fd,mode|fcntl.LOCK_NB)
-    except OSError as exc:
-        if kind not in ('nfs','nfs4','cifs','smb3') or exc.errno not in (errno.EBADF,errno.EINVAL,errno.EISDIR,errno.EOPNOTSUPP):
-            raise
-        # No inode is added to the dataset, and no file being replaced is used
-        # as a lock. Every machine must use the SAME shared coordinator.
-
-
 def require(condition, message):
     if not condition:
         raise RefineError(str(message))

@@ -182,16 +182,8 @@ def select(work, profile, cache, python=None, conda_env=None, leases=None, insta
         return json.loads(result.stdout.strip().splitlines()[-1])
 
     def locks(trial, candidate, snapshot, exclusive=False):
-        # GPU launchers use --no-install: checking/using an existing environment
-        # does not mutate it and must not require shared-filesystem flock support.
-        if not install_missing:
-            return []
-        held = [trial.enter_context(environment_lease(work, snapshot['prefix'], exclusive))]
-        runtime = Path(candidate).parent.parent.resolve().parent
-        if (runtime / 'bootstrap.lock').is_file():
-            from recam_refine.bootstrap import runtime_lock
-            held.append(trial.enter_context(runtime_lock(runtime, read_only=not exclusive)))
-        return held
+        # Compatibility with the existing selection API; no filesystem leases.
+        return []
 
     for candidate in candidates(work, profile, python, conda_env):
         if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
@@ -245,20 +237,6 @@ def select(work, profile, cache, python=None, conda_env=None, leases=None, insta
                 addition = supplement(candidate, snapshot, packages, profile, cache, env)
                 report = check(candidate, fds)
                 report['supplement'] = addition
-            import errno
-            import fcntl
-            for lock in held:
-                # Downgrade the exclusive install lease to a shared read lease so
-                # GPU/CPU workers can run concurrently. A direct EX->SH downgrade
-                # returns ENOSYS on some network/FUSE work filesystems, so release
-                # first and re-acquire shared; tolerate filesystems that do not
-                # implement shared locks at all (the install phase is already done).
-                try:
-                    fcntl.flock(lock, fcntl.LOCK_UN)
-                    fcntl.flock(lock, fcntl.LOCK_SH)
-                except OSError as exc:
-                    if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP):
-                        raise
             if leases is not None:
                 leases.enter_context(trial.pop_all())
             return candidate, report, fds if leases is not None else ()

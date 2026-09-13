@@ -63,22 +63,13 @@ def worker(args,shard_id):
 
 
 class ShardTests(unittest.TestCase):
-    def test_network_directory_fallback_keeps_contention_errors(self):
-        import fcntl
-        from recam_refine.common import acquire_directory_lock, validate_lock_mount
-        with tempfile.TemporaryDirectory() as td:
-            fd = os.open(td,os.O_RDONLY|os.O_DIRECTORY)
-            try:
-                with patch('recam_refine.common.validate_lock_mount',return_value='nfs4'), \
-                     patch.object(fcntl,'flock',side_effect=OSError(errno.EBADF,'NFS directory is read only')):
-                    acquire_directory_lock(fd,fcntl.LOCK_EX)
-                with patch('recam_refine.common.validate_lock_mount',return_value='nfs4'), \
-                     patch.object(fcntl,'flock',side_effect=BlockingIOError(errno.EAGAIN,'busy')),self.assertRaises(BlockingIOError):
-                    acquire_directory_lock(fd,fcntl.LOCK_EX)
-                with patch('recam_refine.common.lock_mount',return_value=('nfs4',{'local_lock=all'})),self.assertRaises(RefineError):
-                    validate_lock_mount(Path(td))
-            finally:
-                os.close(fd)
+    def test_cpu_and_worker_paths_never_call_file_locks(self):
+        with tempfile.TemporaryDirectory() as td, patch('fcntl.flock',side_effect=AssertionError('File lock')):
+            args,_,_ = fixture(Path(td))
+            with worker_locks(args.root,args.work_dir,Path(td)/'worker0',0):
+                with locked_step(args.root,args.work_dir):
+                    pass
+            self.assertFalse(list(args.work_dir.rglob('run.lock')))
 
     def test_disjoint_shards_resume_merge_and_apply_boundary(self):
         with tempfile.TemporaryDirectory() as td:
@@ -110,18 +101,6 @@ class ShardTests(unittest.TestCase):
             args.step = 'cleanup'
             with self.assertRaises(RefineError):
                 run_step(args)
-
-    def test_readers_coexist_duplicate_shard_and_writers_are_excluded(self):
-        with tempfile.TemporaryDirectory() as td:
-            args,_,_ = fixture(Path(td))
-            with worker_locks(args.root,args.work_dir,Path(td)/'worker0',0):
-                with worker_locks(args.root,args.work_dir,Path(td)/'worker1',1):
-                    with self.assertRaises(RuntimeError):
-                        with locked_step(args.root,args.work_dir):
-                            pass
-                    with self.assertRaises(RuntimeError):
-                        with worker_locks(args.root,args.work_dir,Path(td)/'duplicate',0):
-                            pass
 
     def test_changed_input_wrong_plan_and_extra_results_are_rejected(self):
         with tempfile.TemporaryDirectory() as td:

@@ -75,23 +75,8 @@ def missing_requirements(snapshot, packages, profile):
 
 @contextmanager
 def environment_lease(work, prefix, exclusive=False, timeout=30):
-    """All workers sharing a coordinator serialize repairs and keep read leases."""
-    import fcntl
-    folder = work / 'existing_environment_locks'
-    folder.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha256(str(Path(prefix).resolve()).encode()).hexdigest()
-    with (folder / (key + '.lock')).open('a+') as lock:
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fcntl.flock(lock, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB)
-                break
-            except BlockingIOError as exc:
-                if time.monotonic() >= deadline:
-                    raise RuntimeError('Environment is in use or being supplemented; finish active workers before '
-                                       'changing dependencies, then retry the same command') from exc
-                time.sleep(.1)
-        yield lock
+    """Compatibility context: install once on CPU before starting workers."""
+    yield None
 
 
 def fetch_wheel(url, digest, path):

@@ -20,7 +20,7 @@ from PIL import Image
 from .archives import checked_png_array, frame_files, unpack_archive
 from .common import (Journal, array_hash, preserved_hashes, check_transform, media_path, parquet_path, read_json,
                      read_jsonl, require, safe_path, set_values, sha256, values,
-                     sync_dir, write_json, write_jsonl, acquire_directory_lock, validate_lock_mount)
+                     sync_dir, write_json, write_jsonl)
 from .inputs import canonical_manifest, download_inputs, load_depth_records
 from .media import trim_video, video_info
 from .pointworld import Robot, prepare_assets, refine_camera_with_retry, release_pose, POINTWORLD_COMMIT, CalibrationRejected
@@ -395,24 +395,8 @@ def finalize(root, droid, subsets, work):
 
 
 def run(args):
-    """Lock both the work directory and the dataset, even across work dirs."""
-    import fcntl
-    root, work = args.root.resolve(), args.work_dir.resolve()
-    require(root.is_dir(), f"Missing dataset root: {root}")
-    require(not work.is_relative_to(root) and not root.is_relative_to(work), "work-dir must be outside and separate from recam_lerobot")
-    work.mkdir(parents=True, exist_ok=True)
-    validate_lock_mount(work)
-    with (work / "run.lock").open("a+") as lock:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquire_directory_lock(fd, fcntl.LOCK_EX)
-            except BlockingIOError:
-                raise RuntimeError("Another refinement is using this dataset or work directory")
-            _run_locked(args)
-        finally:
-            os.close(fd)
+    """Execute the single CPU workflow; the operator schedules writers."""
+    return _run_locked(args)
 
 
 def _run_locked(args):

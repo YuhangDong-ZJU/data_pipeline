@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 from PIL import Image, ImageDraw, ImageFont
 
 from .common import (require, read_json, read_jsonl, write_json, values, sha256,
-                     check_transform, media_path, parquet_path, array_hash, acquire_directory_lock, validate_lock_mount)
+                     check_transform, media_path, parquet_path, array_hash)
 from .geometry_metrics import (robot_mask, scene_cloud, cloud_matches, aggregate_matches,
                                aggregate_depth, contour_overlay, WORKSPACE_MIN, WORKSPACE_MAX)
 from .inputs import load_depth_records
@@ -365,28 +365,8 @@ def _audit_worker(task):
 
 
 def run_audit(args):
-    """Hold shared input locks and an exclusive report lock during the audit."""
-    import fcntl
-    from contextlib import ExitStack
-    root, work, out = args.root.resolve(), args.work_dir.resolve(), args.report_dir.resolve()
-    require(root.is_dir(), f"Missing dataset: {root}")
-    require(not work.is_relative_to(root) and not out.is_relative_to(root), "Audit work/report must be outside the dataset")
-    work.mkdir(parents=True, exist_ok=True)
-    out.mkdir(parents=True, exist_ok=True)
-    validate_lock_mount(work)
-    validate_lock_mount(out)
-    with ExitStack() as stack:
-        run_lock = stack.enter_context((work / "run.lock").open("a+"))
-        report_lock = stack.enter_context((out / "audit.lock").open("a+"))
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-        stack.callback(os.close, fd)
-        try:
-            fcntl.flock(run_lock, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            acquire_directory_lock(fd, fcntl.LOCK_SH)
-            fcntl.flock(report_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise RuntimeError("Dataset refinement or another writer is using this audit report") from exc
-        return _run_audit_locked(args)
+    """Run on one CPU after all dataset writers have completed."""
+    return _run_audit_locked(args)
 
 
 def _run_audit_locked(args):

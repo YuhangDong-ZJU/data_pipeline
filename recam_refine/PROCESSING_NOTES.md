@@ -4,6 +4,14 @@ The four machine scripts and their arguments are unchanged. Use the same work
 directory when updating: existing completion records and GPU checkpoints remain
 valid. Stop processes using the shared checkout before updating it.
 
+The processing scripts no longer acquire filesystem locks, including environment
+installation, exclusion, GPU workers, CPU validation and finalization. Old lock
+files are ignored. Assign non-overlapping chunks/shards, start each shard once,
+install shared dependencies on one CPU before workers start, and run CPU merging,
+validation and finalization only after every GPU worker exits. Completion records
+and recovery journals remain. Dependency version files named requirements*.lock
+are package lists, not process/file locks.
+
 | Stage | Work performed |
 | --- | --- |
 | Scan/exclude | Read timestamp sidecars and remove the confirmed episode with corresponding index/metadata updates. Completed exclusion is skipped. |

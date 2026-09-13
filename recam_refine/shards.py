@@ -20,7 +20,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from .common import (atomic_bytes, check_transform, media_path, parquet_path, read_json,
-                     require, safe_path, sha256, write_json, acquire_directory_lock, validate_lock_mount)
+                     require, safe_path, sha256, write_json)
 from .pointworld import BATCHED_BACKEND_VERSION, POINTWORLD_COMMIT, URDF_RELATIVE, prepare_assets
 from .steps import MARKERS, camera_inputs, freeze_settings, locked_step
 
@@ -146,40 +146,13 @@ def part_jobs(work,part):
 
 @contextmanager
 def worker_locks(root,work,local,shard_id):
-    import fcntl
     require(root.is_dir() and work.is_dir(),'Shared dataset/coordinator must exist')
     require(not any(a.is_relative_to(b) or b.is_relative_to(a) for a,b in ((root,work),(root,local),(work,local))),
             'worker-work-dir, dataset and coordinator must be separate, non-nested directories')
     local.mkdir(parents=True,exist_ok=True)
-    validate_lock_mount(work)
-    validate_lock_mount(local)
-    with ExitStack() as stack:
-        handles = []
-        handles.append((stack.enter_context((work/'run.lock').open('a+')),fcntl.LOCK_SH))
-        fd = os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-        stack.callback(os.close,fd)
-        handles.append((fd,fcntl.LOCK_SH))
-        shared = work/f'shards/results/shard-{shard_id:05d}'
-        shared.mkdir(parents=True,exist_ok=True)
-        handles.append((stack.enter_context((shared/'run.lock').open('a+')),fcntl.LOCK_EX))
-        handles.append((stack.enter_context((local/'run.lock').open('a+')),fcntl.LOCK_EX))
-        warned = False
-        for handle,mode in handles:
-            try:
-                if isinstance(handle,int):
-                    acquire_directory_lock(handle,mode)
-                else:
-                    fcntl.flock(handle,mode|fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise RuntimeError('Another writer, duplicate shard worker, or worker-work-dir is active; preserve directories and retry later')
-            except OSError as exc:
-                import errno
-                if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP):
-                    raise
-                if not warned:
-                    print('共享存储不支持 flock，按固定分片继续；每个分片只启动一次，运行期间不执行 CPU 写回。',flush=True)
-                    warned = True
-        yield shared
+    shared = work/f'shards/results/shard-{shard_id:05d}'
+    shared.mkdir(parents=True,exist_ok=True)
+    yield shared
 
 
 def provenance(plan,part,job):

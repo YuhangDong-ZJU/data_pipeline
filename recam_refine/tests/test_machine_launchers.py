@@ -9,7 +9,7 @@ import tempfile
 import unittest
 
 
-@unittest.skipUnless(os.name == 'posix' and shutil.which('flock'), 'Linux Bash/flock')
+@unittest.skipUnless(os.name == 'posix', 'Linux Bash')
 class MachineLaunchers(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='recam_launchers_')
@@ -160,15 +160,15 @@ if stage=='shard-plan':
         self.launch('prepare',success=False)
         self.assertNotIn('exclude-6795',[r[0] for r in self.trace()])
 
-    def test_workflow_lease_allows_gpu_parallelism_but_blocks_cpu(self):
+    def test_old_workflow_lock_is_ignored(self):
         import fcntl
         self.launch('prepare')
         with (self.work/'launchers/workflow.lock').open('a') as lease:
             fcntl.flock(lease,fcntl.LOCK_SH|fcntl.LOCK_NB)
             self.launch('gpu1')
             self.launch('gpu2')
-            self.launch('prepare',success=False)
-            self.launch('cpu_finish',success=False)
+            self.launch('prepare')
+            self.launch('cpu_finish')
         self.launch('cpu_finish')
 
     def test_pull_new_entry_then_skip_completed_data_steps(self):

@@ -10,8 +10,7 @@ import hashlib
 import json
 from concurrent.futures import ProcessPoolExecutor
 
-from .common import (require, read_json, read_jsonl, write_json, sha256, media_path, parquet_path,
-                     acquire_directory_lock, validate_lock_mount)
+from .common import (require, read_json, read_jsonl, write_json, sha256, media_path, parquet_path)
 from .inputs import canonical_manifest, download_manifest
 
 
@@ -38,9 +37,8 @@ def manual_workflow(root, work):
 def transfer_only(args):
     from .progress import phase
     phase('加载迁移模块（任务）', 0, 1)
-    import fcntl
     from .pipeline import transfer_depth, parse_chunks
-    phase('检查迁移路径与目录锁（任务）', 0, 1)
+    phase('检查迁移路径（任务）', 0, 1)
     root, work, source = args.root.resolve(), args.work_dir.resolve(), args.depth_output.resolve()
     require(root.is_dir(), f'Missing dataset root: {root}')
     require(not work.is_relative_to(root) and not root.is_relative_to(work), 'work-dir must be outside the dataset')
@@ -48,52 +46,41 @@ def transfer_only(args):
     droid = root/'real_world/droid'
     require(droid.is_dir(), f'Expected {droid}')
     work.mkdir(parents=True,exist_ok=True)
-    validate_lock_mount(work)
-    with (work/'run.lock').open('a+') as lock:
-        fd = os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-        try:
-            try:
-                mode = fcntl.LOCK_EX
-                fcntl.flock(lock,mode|fcntl.LOCK_NB)
-                acquire_directory_lock(fd,mode)
-            except BlockingIOError:
-                raise RuntimeError('Another refinement is using this dataset or work directory')
-            manual_workflow(root,work)
-            phase('检查迁移路径与目录锁（任务）', 1, 1)
-            phase('读取并校验 DROID metadata（任务）', 0, 1)
-            chunks = parse_chunks(args.depth_chunks)
-            info_path, episodes_path = droid/'meta/info.json', droid/'meta/episodes.jsonl'
-            info = read_json(info_path)
-            require(info.get('codebase_version')=='v2.1' and info['chunks_size']==1000,
-                    'Step 1 expects the ReCam LeRobot v2.1 / 1000-episode chunk layout')
-            episodes = [e for e in read_jsonl(episodes_path) if int(e.get('source_episode_index',e['episode_index']))//1000 in chunks]
-            require(episodes, f'No target episodes in chunks {args.depth_chunks}')
-            phase('读取并校验 DROID metadata（任务）', 1, 1, f'选中 {len(episodes)} 个 episode')
-            manifest_path = args.episode_manifest or download_manifest(work,sorted({int(e.get('source_episode_index',e['episode_index']))//1000 for e in episodes}))
-            manifest = canonical_manifest(manifest_path,episodes)
-            config = transfer_configuration(root,source,chunks,manifest)
-            config_path = work/'step1_configuration.json'
-            if config_path.exists():
-                require(read_json(config_path)==config, 'Step 1 paths/chunks/identities changed; use the original command')
-            else:
-                require(not (work/'03_plan.complete.json').exists(), 'Cannot transfer new depth after alignment has started')
-                write_json(config_path,config)
-            if (work/'03_plan.complete.json').exists():
-                require((work/'STEP1_DEPTH_TRANSFER_SUCCESS.json').exists(), 'Incomplete transfer before alignment')
-                print('Step 1 already completed; later stages have started. No data changed.',flush=True)
-                return
-            transferred = transfer_depth(root,droid,source,manifest,chunks,work,workers=args.workers)
-            # transfer_depth already verified copies or atomically renamed directories.
-            total = sum(row['frame_count'] for row in transferred)
-            result = dict(stage=1,complete=True,episodes=len(episodes),cameras=2*len(episodes),png_files=total,
-                          destination=str(droid/'images'),metadata_unchanged=True,
-                          source_cleanup='same-filesystem files moved; cross-filesystem originals retained until final checks')
-            write_json(work/'02_transfer.complete.json',dict(complete=True))
-            write_json(work/'STEP1_DEPTH_TRANSFER_SUCCESS.json',result)
-            (work/'STEP1_FAILED.json').unlink(missing_ok=True)
-            print(f'STEP 1 COMPLETE: {len(episodes)} episodes / {total} PNGs. Stopped after depth transfer.',flush=True)
-        finally:
-            os.close(fd)
+    manual_workflow(root,work)
+    phase('检查迁移路径（任务）', 1, 1)
+    phase('读取并校验 DROID metadata（任务）', 0, 1)
+    chunks = parse_chunks(args.depth_chunks)
+    info_path, episodes_path = droid/'meta/info.json', droid/'meta/episodes.jsonl'
+    info = read_json(info_path)
+    require(info.get('codebase_version')=='v2.1' and info['chunks_size']==1000,
+            'Step 1 expects the ReCam LeRobot v2.1 / 1000-episode chunk layout')
+    episodes = [e for e in read_jsonl(episodes_path) if int(e.get('source_episode_index',e['episode_index']))//1000 in chunks]
+    require(episodes, f'No target episodes in chunks {args.depth_chunks}')
+    phase('读取并校验 DROID metadata（任务）', 1, 1, f'选中 {len(episodes)} 个 episode')
+    manifest_path = args.episode_manifest or download_manifest(work,sorted({int(e.get('source_episode_index',e['episode_index']))//1000 for e in episodes}))
+    manifest = canonical_manifest(manifest_path,episodes)
+    config = transfer_configuration(root,source,chunks,manifest)
+    config_path = work/'step1_configuration.json'
+    if config_path.exists():
+        require(read_json(config_path)==config, 'Step 1 paths/chunks/identities changed; use the original command')
+    else:
+        require(not (work/'03_plan.complete.json').exists(), 'Cannot transfer new depth after alignment has started')
+        write_json(config_path,config)
+    if (work/'03_plan.complete.json').exists():
+        require((work/'STEP1_DEPTH_TRANSFER_SUCCESS.json').exists(), 'Incomplete transfer before alignment')
+        print('Step 1 already completed; later stages have started. No data changed.',flush=True)
+        return
+    transferred = transfer_depth(root,droid,source,manifest,chunks,work,workers=args.workers)
+    # transfer_depth already verified copies or atomically renamed directories.
+    total = sum(row['frame_count'] for row in transferred)
+    result = dict(stage=1,complete=True,episodes=len(episodes),cameras=2*len(episodes),png_files=total,
+                  destination=str(droid/'images'),metadata_unchanged=True,
+                  source_cleanup='same-filesystem files moved; cross-filesystem originals retained until final checks')
+    write_json(work/'02_transfer.complete.json',dict(complete=True))
+    write_json(work/'STEP1_DEPTH_TRANSFER_SUCCESS.json',result)
+    (work/'STEP1_FAILED.json').unlink(missing_ok=True)
+    print(f'STEP 1 COMPLETE: {len(episodes)} episodes / {total} PNGs. Stopped after depth transfer.',flush=True)
+
 
 
 MARKERS = {'transfer':'STEP1_DEPTH_TRANSFER_SUCCESS.json','unpack':'STEP2_UNPACK_SUCCESS.json',
@@ -106,24 +93,11 @@ PREVIOUS = {'unpack':'transfer','align':'unpack','overlap':'align','refine':'ove
 
 @contextmanager
 def locked_step(root,work,shared=False):
-    import fcntl
     require(root.is_dir() and (root/'real_world/droid').is_dir(),f'Missing recam_lerobot/real_world/droid: {root}')
     require(not work.is_relative_to(root) and not root.is_relative_to(work),'work-dir must be separate from the dataset')
     work.mkdir(parents=True,exist_ok=True)
-    validate_lock_mount(work)
-    with (work/'run.lock').open('a+') as lock:
-        fd = os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-        try:
-            try:
-                mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
-                fcntl.flock(lock,mode|fcntl.LOCK_NB)
-                acquire_directory_lock(fd,mode)
-            except BlockingIOError:
-                raise RuntimeError('Another refinement is using this dataset or work directory')
-            manual_workflow(root,work)
-            yield
-        finally:
-            os.close(fd)
+    manual_workflow(root,work)
+    yield
 
 
 def freeze_settings(work,stage,settings):

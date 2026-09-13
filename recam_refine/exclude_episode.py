@@ -18,8 +18,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from .common import (Journal, require, read_json, read_jsonl, write_json, sha256,
-                     parquet_path, set_values, values, acquire_directory_lock,
-                     validate_lock_mount)
+                     parquet_path, set_values, values)
 from .stats import table_stats, aggregate
 from .progress import phase
 
@@ -294,7 +293,6 @@ def execute(root, work, report):
 
 
 def main():
-    import fcntl
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--root',required=True,type=Path)
     p.add_argument('--work-dir',required=True,type=Path)
@@ -303,15 +301,7 @@ def main():
     root,work=a.root.resolve(),a.work_dir.resolve()
     require(root.is_dir() and not work.is_relative_to(root) and not root.is_relative_to(work),'Work must be outside dataset')
     work.mkdir(parents=True,exist_ok=True)
-    validate_lock_mount(work)
-    with (work/'run.lock').open('a+') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY)
-        try:
-            acquire_directory_lock(fd,fcntl.LOCK_EX)
-            execute(root,work,a.scan_report)
-        finally:
-            os.close(fd)
+    execute(root,work,a.scan_report)
 
 
 if __name__ == '__main__':

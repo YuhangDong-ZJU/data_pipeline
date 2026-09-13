@@ -131,7 +131,7 @@ for value in sys.argv[2:]:
     other = Path(value).expanduser().resolve()
     if any(a.is_relative_to(other) or other.is_relative_to(a) for a in (runtime,actual)):
         raise SystemExit('ERROR: shared runtime must be separate from dataset, coordinator and worker directories, including symlink targets.')
-if not (actual/'bootstrap.lock').is_file():
+if not (actual/'env/bin/python').is_file():
     raise SystemExit('ERROR: shared runtime not prepared; run bootstrap.py on the CPU host first.')
 print(runtime)
 PY
