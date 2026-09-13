@@ -59,3 +59,13 @@ step and the final TARs are generated from the retained episodes as usual.
 After pulling this version, rerun the failed `run_gpu1.sh`/`run_gpu2.sh` launchers;
 completed episodes are skipped. When both finish, run `run_cpu_finish.sh`.
 Preparation does not need to be repeated just for this update.
+
+Each completed GPU shard prints acceptance counts and writes
+`calibration_acceptance_report.json` in its worker directory. CPU merge writes
+the combined report in `$RECAM_WORK`. Counts distinguish locally accepted
+cameras, retained initial poses, reused PointWorld releases, and excluded
+bad-depth episodes; episode-level paired acceptance counts are also included.
+This uses the result JSONs already read during publication, without media reads
+or fitting. For an older/partial run, use the prepared Python environment to run
+`python -m recam_refine.calibration_report /path/to/worker_or_coordinator`.
+That command summarizes saved results only; it does not declare a run complete.

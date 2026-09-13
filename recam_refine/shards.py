@@ -272,13 +272,17 @@ def refine_shard(root,work,args):
             if pending:
                 run_calibrations(root/'real_world/droid',info,pending,work/'pointworld'/URDF_RELATIVE,local,args,backend)
             candidates = {}
+            from .calibration_report import CalibrationReport
+            report = CalibrationReport()
             for job in jobs:
                 name = f'episode_{job["episode_index"]:06d}.json'
                 value = read_json(local/'cameras'/name)
                 validate_candidate(value,job,plan,part,require_provenance=False)
+                report.add(value)
                 value['shard_provenance'] = provenance(plan,part,job)
                 require_equal_file(shared/'cameras'/name,value)
                 candidates[name] = sha256(shared/'cameras'/name)
+            report.save(local,f'shard {args.shard_id}')
             receipt = dict(**binding,complete=True,candidate_sha256=candidates,episodes=len(jobs),
                            elapsed_seconds=time.perf_counter()-started,host=context['host'],inputs_verified=True)
             write_json(shared/'COMPLETE.json',receipt)
