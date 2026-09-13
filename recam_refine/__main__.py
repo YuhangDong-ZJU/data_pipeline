@@ -201,6 +201,7 @@ def main():
         elif args.command == "prepare-viewer":
             prepare_viewer(args)
     except Exception as exc:
+        traceback.print_exc(file=sys.stderr)
         print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         if args.command in ('run','transfer-depth','run-step') and not args.work_dir.resolve().is_relative_to(args.root.resolve()):
             name = ('FAILED.json' if args.command=='run' else 'STEP1_FAILED.json' if args.command=='transfer-depth'
