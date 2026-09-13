@@ -71,6 +71,17 @@ def analyze(workers, output):
     report = dict(summary=dict(counts),
         note='统计已保存结果，可能不包含未完成的 episode。拒绝原因可重叠，不能相加；误差和平移单位为米，旋转为度。旧结果未保存完整可观测性标记；未重新判定或修改外参。',
         cameras=details)
+    by_episode = {}
+    for row in details:
+        key = (row['shard'], row['episode_index'])
+        entry = by_episode.setdefault(key, dict(shard=row['shard'],episode_index=row['episode_index'],
+            source_episode_id=row['source_episode_id'],retained_cameras=[],detected_reasons=[]))
+        entry['retained_cameras'].append(row['camera'])
+        entry['detected_reasons'] = sorted(set(entry['detected_reasons']) | set(row['detected_reasons']))
+    counts['至少一个外部相机未通过的episode数'] = len(by_episode)
+    counts['两个外部相机都未通过的episode数'] = sum(set(e['retained_cameras'])=={1,2} for e in by_episode.values())
+    report['summary'] = dict(counts)
+    report['episodes'] = list(by_episode.values())
     output.parent.mkdir(parents=True,exist_ok=True)
     output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
     print('\n统计结果（原因可重叠）：',flush=True)

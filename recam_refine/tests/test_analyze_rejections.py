@@ -35,4 +35,6 @@ class RejectionTests(unittest.TestCase):
             result=analyze(root,root/'report.json')
             self.assertEqual(result['summary']['保留原值的相机总数'],2)
             self.assertEqual(len(result['cameras']),2)
+            self.assertEqual(result['summary']['至少一个外部相机未通过的episode数'],2)
+            self.assertEqual(result['summary']['两个外部相机都未通过的episode数'],0)
             self.assertEqual(json.loads((root/'report.json').read_text(encoding='utf-8')),result)
