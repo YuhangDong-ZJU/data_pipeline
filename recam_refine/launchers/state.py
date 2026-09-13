@@ -128,8 +128,13 @@ def ready(save=False, allow_update=False, refresh=False):
         part.write_text(json.dumps(value, indent=2)+'\n', encoding='utf-8')
         part.replace(target)
     value = read(target)
-    if value['config'] != configuration():
-        raise ValueError('Shared paths/options changed after preparation; restore the original configuration')
+    current = configuration()
+    # Device selection and batch capacity are host resources, not dataset/fit
+    # identity. Keep old preparation receipts usable on differently sized hosts.
+    changed = [k for k in current if k not in ('GPU_DEVICES','GPU_BATCH_SIZE') and
+               value['config'].get(k) != current[k]]
+    if changed:
+        raise ValueError('Shared paths/options changed after preparation: '+', '.join(changed))
     current_code = code_digest()
     if value['code_sha256'] != current_code and not allow_update:
         raise ValueError('Processing code changed after preparation; do not update code during this run')

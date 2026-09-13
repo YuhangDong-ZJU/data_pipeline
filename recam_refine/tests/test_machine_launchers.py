@@ -160,6 +160,16 @@ if stage=='shard-plan':
         self.launch('prepare',success=False)
         self.assertNotIn('exclude-6795',[r[0] for r in self.trace()])
 
+    def test_gpu_resources_can_change_without_repreparing(self):
+        self.launch('prepare')
+        before=(self.work/'launchers/PREPARE_READY.json').read_bytes()
+        self.launch('gpu1',GPU_DEVICES='0,1,2,3',GPU_BATCH_SIZE='8')
+        self.launch('gpu2',GPU_DEVICES='0,1',GPU_BATCH_SIZE='4')
+        self.assertEqual((self.work/'launchers/PREPARE_READY.json').read_bytes(),before)
+        self.assertEqual([r[0] for r in self.trace()].count('align'),1)
+        self.launch('gpu1',GPU_DEVICES='0',GPU_BATCH_SIZE='1')
+        self.assertEqual([r[0] for r in self.trace()].count('shard-refine'),2)
+
     def test_old_workflow_lock_is_ignored(self):
         import fcntl
         self.launch('prepare')
