@@ -290,8 +290,8 @@ def apply_only(root,work,args):
     candidates = read_json(work/MARKERS['refine'])['candidate_sha256']
     require({p.name:sha256(p) for p in sorted((work/'cameras').glob('episode_*.json'))}==candidates,
             'Candidates changed after refinement; refusing to apply unverified replacements')
-    from .quarantine import apply_filtered
-    excluded = read_json(work/'excluded_bad_depth.json') if (work/'excluded_bad_depth.json').exists() else []
+    from .quarantine import apply_filtered, select_training
+    excluded = select_training(work,jobs)
     if excluded:
         return apply_filtered(root,work,args,jobs,info,excluded)
     tasks,offset = [],0

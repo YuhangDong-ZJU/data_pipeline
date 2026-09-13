@@ -34,6 +34,20 @@ class BadDepthTests(unittest.TestCase):
             self.assertEqual(set(order),set(range(10))-bad)
             self.assertEqual(len(order),10-len(bad))
 
+    def test_training_selection_requires_both_cameras_and_keeps_release(self):
+        from recam_refine.quarantine import select_training
+        with tempfile.TemporaryDirectory() as td:
+            work=Path(td)
+            jobs=[dict(episode_index=i,source={'source_episode_id':str(i)}) for i in range(4)]
+            records=[dict(source='pointworld_release'),
+                     dict(source='pointworld_method_droid_initialization',metrics=[{'accepted':True}]*2),
+                     dict(source='pointworld_method_droid_initialization',metrics=[{'accepted':True},{'accepted':False}]),
+                     dict(excluded_bad_depth=True)]
+            for i,record in enumerate(records):
+                write_json(work/'cameras'/f'episode_{i:06d}.json',record)
+            self.assertEqual([e['episode_index'] for e in select_training(work,jobs)],[2,3])
+            self.assertEqual(read_json(work/'training_selection.json')['retained_episodes'],2)
+
     def test_bad_jobs_complete_but_other_errors_remain_fatal(self):
         import argparse
         from recam_refine import calibration as c
@@ -67,6 +81,11 @@ class BadDepthTests(unittest.TestCase):
                         write_json(path,excluded_candidate(job,[dict(episode_index=0,camera=1,bad_depth=True,error='broken.png')]))
                     else:
                         fake_calibration(root,info,[(job,path)],urdf,work,aa,backend)
+                        value=read_json(path)
+                        value['metrics']=[dict(accepted=True,initial_train_loss=.05,final_train_loss=.04,
+                            initial_holdout_loss=.05,final_holdout_loss=.04,train_frames=[0,1],holdout_frames=[2,3],
+                            iterations=1)]*2
+                        write_json(path,value)
             for i in range(2):
                 with patch('recam_refine.calibration.run_calibrations',fitting):
                     refine_shard(args.root,args.work_dir,worker(args,i))

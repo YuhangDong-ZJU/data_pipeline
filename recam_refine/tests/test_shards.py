@@ -96,8 +96,9 @@ class ShardTests(unittest.TestCase):
             self.assertEqual(all_files(droid),before)
             merge_shards(args.root,args.work_dir,args)
             args.step = 'apply'
-            run_step(args)
-            self.assertTrue((args.work_dir/MARKERS['apply']).exists())
+            with self.assertRaisesRegex(RefineError,'Invalid excluded episode IDs'):
+                run_step(args)  # Both fixture episodes failed: refuse an empty dataset.
+            self.assertFalse((args.work_dir/MARKERS['apply']).exists())
             args.step = 'cleanup'
             with self.assertRaises(RefineError):
                 run_step(args)

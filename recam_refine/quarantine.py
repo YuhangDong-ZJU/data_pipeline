@@ -22,6 +22,33 @@ def survivor_order(count, bad):
     return [next(donors) if i in bad else i for i in range(size)]
 
 
+def select_training(work, jobs):
+    excluded = []
+    released = accepted = bad = rejected = 0
+    for job in jobs:
+        value = read_json(work/'cameras'/f'episode_{job["episode_index"]:06d}.json')
+        if value.get('excluded_bad_depth'):
+            reason='bad_depth'
+            bad += 1
+        elif value.get('source')=='pointworld_release':
+            released += 1
+            continue
+        elif (value.get('source')=='pointworld_method_droid_initialization' and
+              len(value.get('metrics',[]))==2 and all(m.get('accepted') is True for m in value['metrics'])):
+            accepted += 1
+            continue
+        else:
+            reason='external_camera_acceptance_not_passed'
+            rejected += 1
+        excluded.append(dict(episode_index=job['episode_index'],source_episode_id=job['source']['source_episode_id'],reason=reason))
+    write_json(work/'training_selection.json',dict(policy='both_external_cameras_accepted_or_pointworld_release',
+        retained_episodes=released+accepted,pointworld_episodes=released,locally_accepted_episodes=accepted,
+        bad_depth_episodes=bad,rejected_calibration_episodes=rejected,excluded=excluded))
+    print(f'训练数据筛选：保留={released+accepted} episodes（PointWorld={released}，双相机通过={accepted}）；'
+          f'排除：坏图={bad}，外参验收未通过={rejected}',flush=True)
+    return excluded
+
+
 def episode_entries(droid, i, chunk_size):
     token = f'episode_{i:06d}'
     for top in ('data','images','videos'):
@@ -76,10 +103,12 @@ def apply_filtered(root,work,args,jobs,info,excluded):
     area = work/'bad_depth_exclusion'
     area.mkdir(parents=True,exist_ok=True)
     done = area/'SUCCESS.json'
+    bad = {v['episode_index'] for v in excluded}
     if done.exists():
+        require(set(read_json(done)['excluded_episodes'])==bad,
+                'Previous CPU exclusion used a different selection; do not reuse its completion record')
         print('SKIPPED bad-depth exclusion: already complete',flush=True)
         return read_json(done)
-    bad = {v['episode_index'] for v in excluded}
     require([j['episode_index'] for j in jobs]==list(range(len(jobs))), 'Expected contiguous input episodes')
     order = survivor_order(len(jobs),bad)
     snapshot = area/'operations.json'

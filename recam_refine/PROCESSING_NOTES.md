@@ -69,3 +69,11 @@ This uses the result JSONs already read during publication, without media reads
 or fitting. For an older/partial run, use the prepared Python environment to run
 `python -m recam_refine.calibration_report /path/to/worker_or_coordinator`.
 That command summarizes saved results only; it does not declare a run complete.
+
+Training selection (CPU apply): keep PointWorld release episodes and local
+episodes with both external cameras explicitly accepted. Exclude the whole
+episode when either camera fails acceptance, as well as confirmed bad-depth
+episodes. `training_selection.json` records exact counts and excluded identities.
+The existing exclusion/mapping pass handles all modalities and metadata together;
+GPU plans/results remain immutable. The historical directory name
+`bad_depth_exclusion` now holds both types of excluded episodes outside the dataset.

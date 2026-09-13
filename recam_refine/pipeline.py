@@ -349,7 +349,8 @@ def finalize(root, droid, subsets, work):
             affected = set(saved['excluded_episodes']) | {int(i) for i in saved['renumbered']} | set(saved['renumbered'].values())
             # Original converted depths stay outside the dataset. Do not compare
             # an old target ID with a different episode after tail-hole filling.
-            records = [r for r in records if not any(f'episode_{i:06d}' in Path(r['target']).parts for i in affected)]
+            affected_names = {f'episode_{i:06d}' for i in affected}
+            records = [r for r in records if affected_names.isdisjoint(Path(r['target']).parts)]
         io_map(partial(_cleanup_source, work=work),
                records, 8, '清理源副本（相机序列）')
     # Retire obsolete wrist depth/normal and old plural normal annotations.
