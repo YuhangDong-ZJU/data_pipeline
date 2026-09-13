@@ -151,7 +151,7 @@ if stage=='shard-plan':
         self.assertNotIn('shard-refine',[r[0] for r in self.trace()])
         with (self.repo/'recam_refine/mock_step.py').open('a') as stream:
             stream.write('\n# code changed\n')
-        self.launch('gpu1',success=False)
+        self.launch('gpu1')  # Compatible code updates do not rerun CPU preparation.
 
     def test_newest_wrong_report_blocks_exclusion(self):
         report = self.work/'depth_timestamp_scan_new.json'

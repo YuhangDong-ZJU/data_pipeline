@@ -58,7 +58,7 @@ if [[ "$DRY_RUN" == 0 ]]; then
     [[ "$GROUP" == prepare && -e /proc/$$/fd/9 ]] || { echo 'ERROR: missing update lock'; exit 1; }
   fi
   case "$GROUP" in
-    gpu1|gpu2) flock --shared --nonblock 9 ;;
+    gpu1|gpu2) : ;; # Fixed disjoint shards; no launcher flock on shared FUSE storage.
     *) flock --exclusive --nonblock 9 ;;
   esac
 fi
@@ -159,7 +159,12 @@ if [[ "$GROUP" == prepare ]]; then
 else
   CURRENT='verify preparation'
   SHARED_PYTHON='<prepared-shared-python>'
-  if [[ "$DRY_RUN" == 0 ]]; then SHARED_PYTHON="$("${STATE[@]}" ready)"; fi
+  if [[ "$DRY_RUN" == 0 ]]; then
+    case "$GROUP" in
+      gpu1|gpu2) SHARED_PYTHON="$("${STATE[@]}" ready-compatible)" ;;
+      *) SHARED_PYTHON="$("${STATE[@]}" ready)" ;;
+    esac
+  fi
   unset RECAM_REFINE_ENV_NAME
   export RECAM_REFINE_PYTHON="$SHARED_PYTHON"
   case "$GROUP" in

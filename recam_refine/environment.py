@@ -182,6 +182,10 @@ def select(work, profile, cache, python=None, conda_env=None, leases=None, insta
         return json.loads(result.stdout.strip().splitlines()[-1])
 
     def locks(trial, candidate, snapshot, exclusive=False):
+        # GPU launchers use --no-install: checking/using an existing environment
+        # does not mutate it and must not require shared-filesystem flock support.
+        if not install_missing:
+            return []
         held = [trial.enter_context(environment_lease(work, snapshot['prefix'], exclusive))]
         runtime = Path(candidate).parent.parent.resolve().parent
         if (runtime / 'bootstrap.lock').is_file():
@@ -264,17 +268,16 @@ def select(work, profile, cache, python=None, conda_env=None, leases=None, insta
 
 def freeze_gpu(work, report):
     """Do not mix library versions between machines or resume checkpoints with new ones."""
-    import fcntl
+    import tempfile
     state = work / 'existing_gpu_environment.json'
     value = {k: report[k] for k in ('python_version', 'packages')}
-    with (work / 'existing_gpu_environment.lock').open('a+') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if state.exists() and json.loads(state.read_text()) != value:
-            raise RuntimeError('GPU environment changed between workers/runs; use the original package versions')
-        if not state.exists():
-            temporary = state.with_suffix('.tmp')
-            temporary.write_text(json.dumps(value, indent=2) + '\n')
-            temporary.replace(state)
+    if state.exists() and json.loads(state.read_text()) != value:
+        raise RuntimeError('GPU environment changed between workers/runs; use the original package versions')
+    if not state.exists():
+        with tempfile.NamedTemporaryFile(mode='w',dir=work,prefix='.gpu-env-',delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(value, indent=2) + '\n')
+        temporary.replace(state)
 
 
 def main():
@@ -305,7 +308,10 @@ def main():
             python, report, fds = select(work, args.profile, cache, args.python, args.conda_env, leases,
                                          install_missing=not args.check_only)
             if args.profile == 'gpu':
-                freeze_gpu(work, report)
+                # Each fixed shard owns its worker directory; no shared writer lock.
+                if work != log_work and (work/'existing_gpu_environment.json').exists():
+                    freeze_gpu(work, report)  # Read/compare the legacy shared record only.
+                freeze_gpu(log_work, report)
             (cache / f'environment_{args.profile}.json').write_text(json.dumps(report, indent=2) + '\n')
             note = 'Missing dependencies installed; existing versions preserved.' if 'supplement' in report else 'No packages installed or upgraded.'
             print(f'REUSING EXISTING ENVIRONMENT: {python}\n{note}', flush=True)
@@ -316,6 +322,8 @@ def main():
                 return subprocess.run([python, *args.command], env=environment(python, cache), pass_fds=fds).returncode
         return 0
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         print(f'ERROR: {exc}', file=sys.stderr, flush=True)
         return 1
 

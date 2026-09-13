@@ -163,6 +163,7 @@ def worker_locks(root,work,local,shard_id):
         shared.mkdir(parents=True,exist_ok=True)
         handles.append((stack.enter_context((shared/'run.lock').open('a+')),fcntl.LOCK_EX))
         handles.append((stack.enter_context((local/'run.lock').open('a+')),fcntl.LOCK_EX))
+        warned = False
         for handle,mode in handles:
             try:
                 if isinstance(handle,int):
@@ -171,6 +172,13 @@ def worker_locks(root,work,local,shard_id):
                     fcntl.flock(handle,mode|fcntl.LOCK_NB)
             except BlockingIOError:
                 raise RuntimeError('Another writer, duplicate shard worker, or worker-work-dir is active; preserve directories and retry later')
+            except OSError as exc:
+                import errno
+                if exc.errno not in (errno.ENOSYS, errno.EOPNOTSUPP):
+                    raise
+                if not warned:
+                    print('共享存储不支持 flock，按固定分片继续；每个分片只启动一次，运行期间不执行 CPU 写回。',flush=True)
+                    warned = True
         yield shared
 
 
